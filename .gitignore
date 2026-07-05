@@ -1,0 +1,19 @@
+# Секреты — никогда не коммитим
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# БД (Этап 2)
+db/*.db
+db/*.sqlite3
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
