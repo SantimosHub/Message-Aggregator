@@ -38,6 +38,7 @@ import time
 from pathlib import Path
 
 import httpx
+from dotenv import dotenv_values
 
 VIBE_API_BASE_URL = os.environ.get("VIBE_API_BASE_URL", "https://vibecode.bitrix24.tech")
 SERVER_NAME = os.environ.get("DEPLOY_SERVER_NAME", "message-aggregator-backend")
@@ -49,6 +50,25 @@ INSTALL_CMD = "pip install -r requirements.txt"
 SERVER_DIR = Path(__file__).resolve().parent.parent
 
 EXCLUDE_NAMES = {".env", "__pycache__", ".venv", "venv", ".git", ".pytest_cache"}
+
+# Какие переменные из server/.env прокидываем В КОНТЕЙНЕР приложения на сервере
+# (это ОТДЕЛЬНО от VIBE_API_KEY, который используется только здесь, локально, для деплоя).
+ENV_VARS_TO_FORWARD = [
+    "VIBE_APP_KEY",
+    "VIBE_API_BASE_URL",
+    "APP_BASE_URL",
+    "PLACEMENT_TITLE",
+    "DATABASE_URL",
+    "CREDENTIALS_ENCRYPTION_KEY",
+]
+
+
+def load_app_env() -> dict:
+    """Читает server/.env (если есть) и возвращает переменные, которые нужно передать в контейнер."""
+    env_path = SERVER_DIR / ".env"
+    values = dotenv_values(env_path) if env_path.exists() else {}
+    forwarded = {k: v for k, v in values.items() if k in ENV_VARS_TO_FORWARD and v}
+    return forwarded
 
 
 def die(msg: str) -> None:
@@ -122,7 +142,16 @@ def main() -> None:
     print(f"\nШаг 3. Собираю архив исходников из {SERVER_DIR}...")
     source_content = build_source_archive()
 
-    print("\nШаг 4. Создаю и деплою galaxy-приложение (POST /v1/infra/servers)...")
+    app_env = load_app_env()
+    if app_env:
+        print(f"  Переменные окружения для контейнера (из server/.env): {sorted(app_env.keys())}")
+    else:
+        print(
+            "  ВНИМАНИЕ: server/.env не найден или пуст — приложение задеплоится БЕЗ VIBE_APP_KEY "
+            "и не сможет отвечать на /api/me, пока .env не заполнен и не сделан повторный деплой."
+        )
+
+    existing_server_id = os.environ.get("DEPLOY_SERVER_ID")
     payload = {
         "name": SERVER_NAME,
         "source": {"content": source_content},
@@ -130,17 +159,32 @@ def main() -> None:
         "install": INSTALL_CMD,
         "start": START_CMD,
         "port": APP_PORT,
+        "env": app_env,
     }
-    with httpx.Client(base_url=VIBE_API_BASE_URL, timeout=120) as client:
-        resp = client.post("/v1/infra/servers", headers=headers, json=payload)
-    print(f"  POST /v1/infra/servers -> {resp.status_code}")
-    data = resp.json()
-    print(f"  Сырой ответ: {data}")
-    if resp.status_code >= 400 or not data.get("success", True):
-        die("создание/деплой сервера не удались — см. сырой ответ выше")
 
-    server = data.get("data", data)
-    server_id = server.get("id")
+    if existing_server_id:
+        print(f"\nШаг 4. Передеплоиваю существующий сервер (id={existing_server_id})...")
+        with httpx.Client(base_url=VIBE_API_BASE_URL, timeout=120) as client:
+            resp = client.post(f"/v1/infra/servers/{existing_server_id}/deploy", headers=headers, json=payload)
+        print(f"  POST /v1/infra/servers/{existing_server_id}/deploy -> {resp.status_code}")
+        data = resp.json()
+        print(f"  Сырой ответ: {data}")
+        if resp.status_code >= 400 or not data.get("success", True):
+            die("редеплой не удался — см. сырой ответ выше")
+        server = data.get("data", data)
+        server_id = existing_server_id
+    else:
+        print("\nШаг 4. Создаю и деплою НОВОЕ galaxy-приложение (POST /v1/infra/servers)...")
+        with httpx.Client(base_url=VIBE_API_BASE_URL, timeout=120) as client:
+            resp = client.post("/v1/infra/servers", headers=headers, json=payload)
+        print(f"  POST /v1/infra/servers -> {resp.status_code}")
+        data = resp.json()
+        print(f"  Сырой ответ: {data}")
+        if resp.status_code >= 400 or not data.get("success", True):
+            die("создание/деплой сервера не удались — см. сырой ответ выше")
+        server = data.get("data", data)
+        server_id = server.get("id")
+
     if not server_id:
         die(f"в ответе нет id сервера: {data}")
 
