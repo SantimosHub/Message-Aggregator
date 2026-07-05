@@ -23,7 +23,7 @@
 
 ## Этап 1. Backend: каркас и авторизация основного портала
 
-- [x] Поднять HTTP-сервер (FastAPI) на Black Hole. *(код готов и проверен локально: `/health` → 200, `/api/me` → корректный 401 без сессии; сам деплой на Black Hole — следующий шаг)*
+- [x] Поднять HTTP-сервер (FastAPI) на Black Hole. *(задеплоено: galaxy app, id `140ccc08-85a9-433f-8b32-a6c087e66bcd`, статус running/CONNECTED, URL `https://app-f296a25c8221.vibecode.bitrix24.tech`)*
 - [x] Реализовать приём `X-Vibe-Authorization` и извлечение `owner_user_id` из запросов виджета. *(`server/app/auth.py`, кэш на 24ч)*
 - [ ] **Разовая настройка (вручную или скриптом):** пройти OAuth-флоу от лица администратора портала (`GET /v1/oauth/authorize` → `POST /v1/oauth/token`), получить `vibe_session_...`, вызвать `POST /v1/placements/bind` ключом `vibe_app_...` + этой сессией. Это нужно сделать один раз при разворачивании — обычные сотрудники дальше открывают виджет без ручного OAuth (Gateway сам подставляет им `X-Vibe-Authorization`). *(скрипт `server/scripts/bind_placement.py` готов, ждём деплоя backend, чтобы был `APP_BASE_URL`)*
 - [x] Настроить хранение `vibe_app_...` в переменных окружения (не в БД, не в коде). *(`server/app/config.py` + `.env.example`)*

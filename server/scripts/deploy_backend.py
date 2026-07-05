@@ -144,8 +144,12 @@ def main() -> None:
     if not server_id:
         die(f"в ответе нет id сервера: {data}")
 
+    initial_url = server.get("appUrl")
+    if initial_url:
+        print(f"  Публичный URL (появляется сразу): {initial_url}")
+
     print(f"\nШаг 5. Сервер создаётся (id={server_id}). Опрашиваю статус...")
-    public_url = None
+    public_url = initial_url
     with httpx.Client(base_url=VIBE_API_BASE_URL, timeout=20) as client:
         for attempt in range(20):
             time.sleep(6)
@@ -153,7 +157,7 @@ def main() -> None:
             info = r.json().get("data", r.json())
             status = info.get("status")
             bh_status = info.get("blackholeStatus")
-            public_url = info.get("url") or info.get("publicUrl") or info.get("domain")
+            public_url = info.get("appUrl") or info.get("url") or info.get("publicUrl") or info.get("domain")
             print(f"  [{attempt + 1}/20] status={status} blackholeStatus={bh_status} url={public_url}")
             if status == "running" and public_url:
                 break
