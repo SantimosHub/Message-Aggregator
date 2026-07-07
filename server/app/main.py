@@ -1,4 +1,4 @@
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 
 from .auth import get_current_owner_user_id
 
@@ -9,6 +9,17 @@ app = FastAPI(title="Bitrix24 Message Aggregator")
 async def health() -> dict:
     """Проверка живости — используется деплоем/мониторингом, без авторизации."""
     return {"status": "ok"}
+
+
+@app.get("/api/debug/headers")
+async def debug_headers(request: Request) -> dict:
+    """
+    ВРЕМЕННЫЙ диагностический эндпоинт (Этап 1, отладка Gateway).
+    Показывает ВСЕ заголовки, реально дошедшие до контейнера — чтобы понять,
+    добавляет ли Gateway X-Vibe-Authorization, или проблема где-то раньше.
+    УДАЛИТЬ после того, как разберёмся с проблемой авторизации placement.
+    """
+    return {"headers": dict(request.headers), "cookies": dict(request.cookies)}
 
 
 @app.get("/api/me")
