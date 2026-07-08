@@ -68,7 +68,10 @@ async def main() -> None:
     print(f"Получен сессионный токен (действует {token_response.get('expires_in', '?')} сек).")
 
     print("\nШаг 4. Регистрирую placement...")
-    handler_url = f"{settings.app_base_url.rstrip('/')}/placement-handler"
+    # ВАЖНО: handler должен быть URL платформы (bitrix-handler), а НЕ наш собственный
+    # app_base_url — платформа явно предупреждает (см. /v1/me.placements.runtime.handlerCheck),
+    # что handler = свой Black Hole URL вызывает зацикливание на логине Битрикс24.
+    handler_url = f"{settings.vibe_api_base_url.rstrip('/')}/v1/bitrix-handler"
     result = await bind_placement(
         session_bearer=session_token,
         placement=DEFAULT_PLACEMENT,
