@@ -40,7 +40,10 @@ async def get_me(session_bearer: str | None = None) -> dict:
     async with httpx.AsyncClient(base_url=settings.vibe_api_base_url, timeout=15) as client:
         resp = await client.get("/v1/me", headers=headers)
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise VibeApiError(resp.status_code, {"non_json_body": resp.text[:500]}) from exc
     if resp.status_code >= 400 or not data.get("success", True):
         raise VibeApiError(resp.status_code, data)
     return data["data"]

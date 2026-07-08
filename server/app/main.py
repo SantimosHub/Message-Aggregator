@@ -55,7 +55,9 @@ async def debug_key_check() -> dict:
         result = await get_me(session_bearer=None)
         return {"ok": True, "result": result}
     except VibeApiError as exc:
-        return {"ok": False, "status_code": exc.status_code, "payload": exc.payload}
+        return {"ok": False, "kind": "VibeApiError", "status_code": exc.status_code, "payload": exc.payload}
+    except Exception as exc:  # noqa: BLE001 — временная диагностика, ловим всё осознанно
+        return {"ok": False, "kind": type(exc).__name__, "message": str(exc)}
 
 
 @app.get("/api/me")
