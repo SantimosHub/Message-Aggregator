@@ -94,11 +94,18 @@ def build_source_archive() -> str:
 def main() -> None:
     api_key = os.environ.get("VIBE_API_KEY")
     if not api_key:
-        die("не задан VIBE_API_KEY (личный ключ, скоуп vibe:infra) в переменных окружения")
-    if not api_key.startswith("vibe_api_"):
+        die("не задан VIBE_API_KEY в переменных окружения")
+    if not (api_key.startswith("vibe_api_") or api_key.startswith("vibe_app_")):
         die(
-            f"VIBE_API_KEY должен быть личным ключом (префикс vibe_api_), "
-            f"а передано значение с другим префиксом. Для деплоя нельзя использовать vibe_app_..."
+            "VIBE_API_KEY должен быть либо личным ключом (vibe_api_...), "
+            "либо OAuth-ключом приложения (vibe_app_...) — оба подходят для деплоя "
+            "УЖЕ СУЩЕСТВУЮЩЕГО сервера без сессии. Для СОЗДАНИЯ нового сервера "
+            "нужен именно личный ключ (vibe_api_) — OAuth-ключ на create требует сессию."
+        )
+    if api_key.startswith("vibe_app_") and not os.environ.get("DEPLOY_SERVER_ID"):
+        die(
+            "С OAuth-ключом (vibe_app_...) нельзя СОЗДАТЬ новый сервер без сессии — "
+            "задай DEPLOY_SERVER_ID для редеплоя существующего, либо используй личный ключ."
         )
 
     headers = {"X-Api-Key": api_key}
