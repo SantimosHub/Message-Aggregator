@@ -40,14 +40,18 @@
 
 ---
 
-## Этап 2. БД и хранилище
+## Этап 2. БД и хранилище ✅ ЗАВЕРШЁН
 
-- [ ] Создать таблицу `external_portals` по схеме из README (раздел 4.3, с учётом правки: `last_message_cursor` — JSON-карта `dialog_id → last_message_id`).
-- [ ] Реализовать шифрование поля `credentials` (ключ шифрования — тоже в env, не в БД).
-- [ ] CRUD-функции: добавить/получить/обновить статус/удалить запись портала.
-- [ ] Миграции (если Postgres) или инициализация файла (если SQLite).
+- [x] Создать таблицу `external_portals` по схеме из README (раздел 4.3, с учётом правки: `last_message_cursor` — JSON-карта `dialog_id → last_message_id`). *(`server/app/db.py`, SQLite, схема + индекс по `owner_user_id`)*
+- [x] Реализовать шифрование поля `credentials` (ключ шифрования — тоже в env, не в БД). *(`server/app/crypto.py`, Fernet — аутентифицированное симметричное шифрование; проверено на диске, что открытый текст реально не хранится)*
+- [x] CRUD-функции: добавить/получить/обновить статус/удалить запись портала. *(`server/app/repositories/external_portals.py`: `create_portal`, `get_portal`, `list_portals_by_owner`, `list_active_portals`, `update_status`, `update_main_chat_id`, `update_cursor`, `delete_portal`)*
+- [x] Инициализация файла (SQLite для MVP). *(`init_db()` в `db.py`, вызывается один раз при старте; путь к файлу — из `DATABASE_URL`, в проде обязательно `/data/...`, см. правку в README раздел 4.3 — подтверждено, что ФС galaxy-сервера эфемерна между деплоями, персистентен только том `/data`)*
 
-**Результат этапа:** можно программно добавить/удалить/прочитать запись о внешнем портале.
+**Результат этапа:** ✅ подтверждено локальным smoke-тестом — можно программно создать/прочитать/обновить/удалить запись о внешнем портале, credentials шифруются прозрачно и не хранятся в БД в открытом виде.
+
+> Зависимости добавлены в `requirements.txt`: `aiosqlite`, `cryptography`.
+> `CREDENTIALS_ENCRYPTION_KEY` генерируется один раз (`generate_encryption_key()` в `crypto.py`) и не должен меняться после появления записей в БД — иначе старые `credentials` станет невозможно расшифровать.
+> `deploy_backend.py` уже пробрасывает `DATABASE_URL` и `CREDENTIALS_ENCRYPTION_KEY` в контейнер (был предусмотрен заранее в списке `ENV_VARS_TO_FORWARD`).
 
 ---
 

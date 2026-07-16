@@ -1,8 +1,15 @@
 from fastapi import Depends, FastAPI
 
 from .auth import get_current_owner_user_id
+from .db import init_db
 
 app = FastAPI(title="Bitrix24 Message Aggregator")
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    """Создаёт таблицы БД при старте, если их ещё нет (Этап 2, PLAN.md)."""
+    await init_db()
 
 
 @app.get("/health")
