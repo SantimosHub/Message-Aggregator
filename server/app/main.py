@@ -2,8 +2,10 @@ from fastapi import Depends, FastAPI
 
 from .auth import get_current_owner_user_id
 from .db import init_db
+from .routes.portals import router as portals_router
 
 app = FastAPI(title="Bitrix24 Message Aggregator")
+app.include_router(portals_router)
 
 
 @app.on_event("startup")

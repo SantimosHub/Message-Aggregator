@@ -19,6 +19,55 @@ class VibeApiError(RuntimeError):
         super().__init__(f"Vibe API error {status_code}: {payload}")
 
 
+async def _request(method: str, path: str, *, headers: dict, json: dict | None = None) -> dict:
+    """Общий helper: выполняет запрос, парсит ответ, кидает VibeApiError при неуспехе."""
+    settings = get_settings()
+    async with httpx.AsyncClient(base_url=settings.vibe_api_base_url, timeout=15) as client:
+        resp = await client.request(method, path, headers=headers, json=json)
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise VibeApiError(resp.status_code, {"non_json_body": resp.text[:500]}) from exc
+    if resp.status_code >= 400 or not data.get("success", True):
+        raise VibeApiError(resp.status_code, data)
+    return data
+
+
+async def create_group_chat(title: str, user_ids: list[int]) -> int:
+    """
+    POST /v1/chats — создаёт групповой чат (im.chat.add). Только X-Api-Key
+    (vibe_app_...), сессия НЕ нужна — фоновая операция от имени приложения
+    (см. README, раздел 9). Возвращает числовой chatId.
+
+    Используется на Этапе 3: один отдельный чат на каждый подключаемый
+    сотрудником внешний портал (README, раздел 1).
+    """
+    settings = get_settings()
+    data = await _request(
+        "POST",
+        "/v1/chats",
+        headers={"X-Api-Key": settings.vibe_app_key},
+        json={"title": title, "users": user_ids},
+    )
+    return data["data"]
+
+
+async def send_chat_message(chat_id: int, text: str) -> int:
+    """
+    POST /v1/chats/chat{chatId}/messages — отправляет сообщение в групповой чат
+    (im.message.add). Возвращает ID отправленного сообщения.
+    """
+    settings = get_settings()
+    dialog_id = f"chat{chat_id}"
+    data = await _request(
+        "POST",
+        f"/v1/chats/{dialog_id}/messages",
+        headers={"X-Api-Key": settings.vibe_app_key},
+        json={"message": text},
+    )
+    return data["data"]
+
+
 async def get_me(session_bearer: str | None = None) -> dict:
     """
     GET /v1/me — с ключом vibe_app_... приложения.
