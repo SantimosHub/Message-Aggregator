@@ -66,27 +66,39 @@ async def connect_portal(
     body: ConnectPortalRequest,
     owner_user_id: int = Depends(get_current_owner_user_id),
 ) -> PortalResponse:
+    print(f"[connect_portal] СТАРТ domain={body.domain!r} auth_type={body.auth_type}", flush=True)
+
     # 1. Валидация credentials — до создания чата и записи в БД.
     try:
+        print("[connect_portal] шаг 1: валидация credentials...", flush=True)
         if body.auth_type == "vibe_api":
             await validate_vibe_api_key(body.credentials)
         else:
             await validate_webhook(body.credentials)
+        print("[connect_portal] шаг 1: OK", flush=True)
     except ExternalPortalCredentialsError as exc:
+        print(f"[connect_portal] шаг 1: ExternalPortalCredentialsError: {exc}", flush=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — временная диагностика, ловим ЛЮБОЕ исключение
+        print(f"[connect_portal] шаг 1: НЕОЖИДАННОЕ исключение {type(exc).__name__}: {exc}", flush=True)
+        raise
 
     # 2. Создание отдельного чата на основном портале для этого сотрудника+портала.
     settings = get_settings()
     chat_title = f"{settings.placement_title}: {body.domain}"
     try:
+        print("[connect_portal] шаг 2: создаю чат...", flush=True)
         chat_id = await create_group_chat(title=chat_title, user_ids=[owner_user_id])
+        print(f"[connect_portal] шаг 2: OK chat_id={chat_id}", flush=True)
     except VibeApiError as exc:
+        print(f"[connect_portal] шаг 2: VibeApiError: {exc.payload}", flush=True)
         raise HTTPException(
             status_code=502,
             detail=f"Не удалось создать чат на основном портале: {exc.payload}",
         ) from exc
 
     # 3. Сохранение записи в БД со статусом active.
+    print("[connect_portal] шаг 3: сохраняю в БД...", flush=True)
     portal = await repo.create_portal(
         owner_user_id=owner_user_id,
         domain=body.domain,
@@ -94,17 +106,21 @@ async def connect_portal(
         credentials=body.credentials,
         main_chat_id=chat_id,
     )
+    print(f"[connect_portal] шаг 3: OK portal_id={portal.id}", flush=True)
 
     # 4. Приветственное сообщение — не критично для успеха подключения,
     #    поэтому ошибку отправки только логируем, не роняем запрос.
     try:
+        print("[connect_portal] шаг 4: отправляю приветственное сообщение...", flush=True)
         await send_chat_message(
             chat_id,
             f"Портал «{body.domain}» подключён. Сюда будут приходить сообщения сотруднику с этого портала.",
         )
-    except VibeApiError:
-        pass  # чат и запись уже созданы успешно — это не повод возвращать ошибку клиенту
+        print("[connect_portal] шаг 4: OK", flush=True)
+    except VibeApiError as exc:
+        print(f"[connect_portal] шаг 4: VibeApiError (игнорируем): {exc.payload}", flush=True)
 
+    print(f"[connect_portal] ФИНИШ portal_id={portal.id}", flush=True)
     return PortalResponse.from_portal(portal)
 
 
