@@ -67,6 +67,8 @@ async def main() -> None:
     session_token = token_response["access_token"]
     print(f"Получен сессионный токен (действует {token_response.get('expires_in', '?')} сек).")
     print(f"[ВРЕМЕННАЯ ДИАГНОСТИКА] Токен: {session_token}")
+    other_fields = {k: v for k, v in token_response.items() if k != "access_token"}
+    print(f"[ВРЕМЕННАЯ ДИАГНОСТИКА] Остальные поля ответа (ищем refresh_token и т.п.): {other_fields}")
 
     print("\nШаг 4. Регистрирую placement...")
     # ВАЖНО: handler должен быть URL платформы (bitrix-handler), а НЕ наш собственный
