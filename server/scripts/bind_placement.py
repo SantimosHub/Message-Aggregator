@@ -66,6 +66,7 @@ async def main() -> None:
     token_response = await exchange_code_for_session(code=code, redirect_uri=redirect_uri)
     session_token = token_response["access_token"]
     print(f"Получен сессионный токен (действует {token_response.get('expires_in', '?')} сек).")
+    print(f"[ВРЕМЕННАЯ ДИАГНОСТИКА] Токен: {session_token}")
 
     print("\nШаг 4. Регистрирую placement...")
     # ВАЖНО: handler должен быть URL платформы (bitrix-handler), а НЕ наш собственный
