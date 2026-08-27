@@ -1,0 +1,169 @@
+"""
+Фоновый планировщик опроса внешних порталов и пересылки сообщений
+(Этап 4 + Этап 5, PLAN.md).
+
+Реализован как обычный asyncio-таск, запускаемый на старте FastAPI
+(без внешних зависимостей вроде APScheduler — решение по Этапу 4).
+
+Ошибка одного портала не должна прерывать опрос остальных (см. README,
+раздел 10, и PLAN.md Этап 4) — поэтому каждый портал обрабатывается в
+собственном try/except, а между полными циклами опроса выдерживается пауза.
+
+Пересылка (Этап 5):
+- Все новые сообщения одного диалога, накопленные за один цикл опроса,
+  объединяются в ОДНО сообщение чата основного портала — это и есть
+  батчинг, требуемый PLAN.md (снижает число вызовов `vibe_app_...`,
+  у которого лимит 300 запросов/мин на ключ, см. README раздел 9).
+- Идемпотентность: курсор диалога продвигается ТОЛЬКО после успешной
+  отправки дайджеста. Если отправка упала — курсор для этого диалога
+  откатывается к последнему подтверждённому значению, и на следующем
+  цикле опроса те же сообщения будут собраны и отправлены заново.
+  Дублирования во внешнем портале это не создаёт (это чтение), а дубли
+  в чате основного портала возможны только если сообщение реально
+  дошло, но подтверждение (HTTP-ответ) было потеряно уже после
+  доставки — такой краевой случай сочтён приемлемым для MVP.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime
+
+from .external_message_fetcher import ExternalPortalApiError, FetchedMessage, fetch_new_messages
+from .repositories import external_portals as repo
+from .vibe_client import VibeApiError, send_chat_message
+
+logger = logging.getLogger("message_aggregator.poller")
+
+POLL_INTERVAL_SECONDS = 45  # середина диапазона 30-60 сек из PLAN.md
+
+
+async def _process_portal(portal: repo.ExternalPortal) -> None:
+    try:
+        new_messages, candidate_cursor = await fetch_new_messages(portal)
+    except ExternalPortalApiError as exc:
+        if exc.is_auth_error:
+            logger.warning(
+                "Портал #%s (%s): ключ/вебхук недействителен, статус -> error: %s",
+                portal.id, portal.domain, exc,
+            )
+            await repo.update_status(portal.id, "error")
+        else:
+            logger.warning("Портал #%s (%s): временная ошибка опроса: %s", portal.id, portal.domain, exc)
+        return
+    except Exception:  # noqa: BLE001 — ошибка одного портала не должна ронять цикл
+        logger.exception("Портал #%s (%s): неожиданная ошибка при опросе", portal.id, portal.domain)
+        return
+
+    final_cursor = dict(candidate_cursor)
+
+    if new_messages:
+        delivered_max_id = await _handle_new_messages(portal, new_messages)
+        dialogs_with_activity = {m.dialog_id for m in new_messages}
+        for dialog_id in dialogs_with_activity:
+            if dialog_id in delivered_max_id:
+                final_cursor[dialog_id] = str(delivered_max_id[dialog_id])
+            else:
+                # Отправка не удалась — откатываем курсор диалога назад,
+                # чтобы эти сообщения не потерялись, а переотправились
+                # на следующем цикле (идемпотентность, см. докстринг выше).
+                final_cursor[dialog_id] = portal.last_message_cursor.get(
+                    dialog_id, final_cursor[dialog_id]
+                )
+
+    if final_cursor != portal.last_message_cursor:
+        await repo.update_cursor(portal.id, final_cursor)
+
+
+def _format_time(iso_date: str) -> str:
+    try:
+        dt = datetime.fromisoformat(iso_date)
+        return dt.strftime("%H:%M %d.%m.%Y")
+    except (ValueError, TypeError):
+        return iso_date or "?"
+
+
+def _format_digest(portal: repo.ExternalPortal, dialog_messages: list[FetchedMessage]) -> str:
+    """
+    Формат: автор, время, текст по каждому сообщению + ссылка на диалог
+    (PLAN.md, Этап 5). Несколько сообщений одного диалога за цикл опроса
+    объединяются в один дайджест.
+
+    Ссылка на диалог собрана по распространённому в сообществе паттерну
+    Битрикс24 `/online/?IM_DIALOG={dialog_id}` — этот формат НЕ значится в
+    официальной REST-документации (в отличие от самих REST-методов),
+    поэтому при проверке на Этапе 7 стоит убедиться, что ссылка реально
+    открывает нужный диалог на конкретном портале.
+    """
+    dialog_messages = sorted(dialog_messages, key=lambda m: m.message_id)
+    title = dialog_messages[0].dialog_title
+    kind = "открытая линия" if dialog_messages[0].is_open_line else "чат"
+
+    lines = [f"💬 {title} ({kind}, портал {portal.domain})", ""]
+    for m in dialog_messages:
+        lines.append(f"{m.author_name}, {_format_time(m.date)}:")
+        lines.append(m.text)
+        lines.append("")
+
+    link = f"https://{portal.domain}/online/?IM_DIALOG={dialog_messages[0].dialog_id}"
+    lines.append(f"Открыть диалог: {link}")
+    return "\n".join(lines).strip()
+
+
+async def _handle_new_messages(
+    portal: repo.ExternalPortal, messages: list[FetchedMessage]
+) -> dict[str, int]:
+    """
+    Пересылает новые сообщения в чат основного портала (`main_chat_id`),
+    по одному объединённому сообщению на диалог за цикл опроса.
+
+    Возвращает {dialog_id: max_message_id}, но только для диалогов, чей
+    дайджест удалось отправить успешно — это и есть источник истины для
+    продвижения курсора в `_process_portal` (идемпотентность).
+    """
+    by_dialog: dict[str, list[FetchedMessage]] = {}
+    for m in messages:
+        by_dialog.setdefault(m.dialog_id, []).append(m)
+
+    delivered: dict[str, int] = {}
+    for dialog_id, dialog_messages in by_dialog.items():
+        text = _format_digest(portal, dialog_messages)
+        try:
+            await send_chat_message(portal.main_chat_id, text)
+        except VibeApiError:
+            logger.exception(
+                "Портал #%s (%s): не удалось отправить дайджест диалога %s в чат %s — "
+                "повторим на следующем цикле опроса",
+                portal.id, portal.domain, dialog_id, portal.main_chat_id,
+            )
+            continue
+
+        delivered[dialog_id] = max(m.message_id for m in dialog_messages)
+        logger.info(
+            "Портал #%s (%s): доставлено %s новых сообщений из «%s» в чат %s",
+            portal.id, portal.domain, len(dialog_messages), dialog_messages[0].dialog_title, portal.main_chat_id,
+        )
+
+    return delivered
+
+
+async def poll_once() -> None:
+    """Один проход по всем активным порталам. Порталы обрабатываются параллельно."""
+    portals = await repo.list_active_portals()
+    if not portals:
+        return
+    await asyncio.gather(*(_process_portal(p) for p in portals))
+
+
+async def _poll_loop() -> None:
+    while True:
+        try:
+            await poll_once()
+        except Exception:  # noqa: BLE001 — цикл не должен останавливаться из-за бага одного прохода
+            logger.exception("Неожиданная ошибка в цикле опроса портала")
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+def start_poller() -> asyncio.Task:
+    """Запускает фоновый таск. Вызывать один раз при старте приложения (main.py)."""
+    return asyncio.create_task(_poll_loop())
