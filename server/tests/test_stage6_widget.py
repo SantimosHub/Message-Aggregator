@@ -1,0 +1,78 @@
+"""
+Smoke-тесты Этапа 6 (PLAN.md): раздача HTML виджета.
+Запуск: .venv\\Scripts\\python.exe -m pytest tests/test_stage6_widget.py -v
+
+CRUD-эндпоинты (/api/portals), которые использует сам виджет, уже покрыты
+test_stage3_portals.py — здесь проверяем только то, что специфично для
+Этапа 6: сама страница отдаётся корректно и содержит нужные "зацепки"
+для JS (то, что реально ищет фронтенд в разметке).
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import tempfile
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+_tmp = tempfile.mkdtemp()
+_db = Path(_tmp) / "test_stage6.db"
+os.environ["DATABASE_URL"] = f"sqlite:///{_db.as_posix()}"
+os.environ["VIBE_APP_KEY"] = "vibe_app_test"
+
+from app.crypto import generate_encryption_key  # noqa: E402
+
+os.environ["CREDENTIALS_ENCRYPTION_KEY"] = generate_encryption_key()
+
+from app.db import init_db  # noqa: E402
+from app.main import app  # noqa: E402
+
+
+def _reset_db() -> None:
+    if _db.exists():
+        _db.unlink()
+    asyncio.run(init_db())
+
+
+@pytest.fixture(autouse=True)
+def fresh_db():
+    _reset_db()
+    yield
+    if _db.exists():
+        _db.unlink()
+
+
+@pytest.fixture
+def client():
+    with TestClient(app) as c:
+        yield c
+
+
+class TestWidgetIndex:
+    def test_root_serves_html_without_auth(self, client):
+        """
+        Сама страница не требует X-Vibe-Authorization — авторизация нужна
+        только вызовам /api/portals/*, которые делает уже JS внутри неё
+        (см. докстринг widget_index() в main.py).
+        """
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
+    def test_widget_calls_correct_api_base(self, client):
+        html = client.get("/").text
+        assert 'API_BASE = "/api/portals"' in html
+
+    def test_widget_has_both_auth_type_options(self, client):
+        html = client.get("/").text
+        assert 'data-auth-type="vibe_api"' in html
+        assert 'data-auth-type="webhook"' in html
+
+    def test_widget_handles_all_three_status_values(self, client):
+        """PortalStatus = Literal["active", "error", "disabled"] — все три должны быть отрисовываемы."""
+        html = client.get("/").text
+        assert '"active"' in html or "active:" in html
+        assert '"error"' in html or "error:" in html
+        assert '"disabled"' in html or "disabled:" in html
