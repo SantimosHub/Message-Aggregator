@@ -51,6 +51,23 @@ def client():
 
 
 class TestWidgetIndex:
+    def test_widget_file_lives_inside_server_so_deploy_ships_it(self):
+        """
+        Регресс на реальный баг: deploy_backend.py архивирует ТОЛЬКО
+        содержимое server/. Если widget/index.html окажется вне этой папки
+        (например, кто-то случайно вернёт его на уровень выше) — файл
+        просто не попадёт в задеплоенный контейнер, и GET / будет отдавать
+        500 (см. коммит с фиксом). Проверяем структуру на диске напрямую,
+        а не только через TestClient, который эту проблему не ловит.
+        """
+        from app.main import WIDGET_INDEX_PATH
+
+        server_dir = Path(__file__).resolve().parent.parent
+        assert WIDGET_INDEX_PATH.exists(), f"widget/index.html не найден: {WIDGET_INDEX_PATH}"
+        assert server_dir in WIDGET_INDEX_PATH.parents, (
+            "widget/index.html должен лежать ВНУТРИ server/, иначе деплой его не заберёт"
+        )
+
     def test_root_serves_html_without_auth(self, client):
         """
         Сама страница не требует X-Vibe-Authorization — авторизация нужна
