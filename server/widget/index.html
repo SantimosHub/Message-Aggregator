@@ -381,6 +381,36 @@
   "use strict";
 
   var API_BASE = "/api/portals";
+  var MAX_RETRIES = 4; // с retryAfter=3с из ответа платформы это ~12 сек максимум ожидания
+
+  /**
+   * Обёртка над fetch с автоповтором на BH_APP_STARTING (503 с полем
+   * retryAfter в теле) — платформенный сигнал "туннель поднят, но
+   * приложение ещё не отвечает, повтори через N секунд". Без этого
+   * повтора любой холодный старт/переподключение туннеля после деплоя
+   * или перепривязки ключа сразу показывался бы пользователю как ошибка,
+   * хотя на самом деле нужно было просто подождать несколько секунд.
+   */
+  function fetchWithRetry(url, options, attempt) {
+    attempt = attempt || 0;
+    return fetch(url, options).then(function (resp) {
+      if (resp.status === 503 && attempt < MAX_RETRIES) {
+        return resp
+          .clone()
+          .json()
+          .catch(function () { return {}; })
+          .then(function (data) {
+            var retryAfterSec = (data.error && data.error.retryAfter) || 2;
+            return new Promise(function (resolve) {
+              setTimeout(resolve, retryAfterSec * 1000);
+            }).then(function () {
+              return fetchWithRetry(url, options, attempt + 1);
+            });
+          });
+      }
+      return resp;
+    });
+  }
 
   var elContent = document.getElementById("content");
   var elSkeleton = document.getElementById("skeleton");
@@ -466,7 +496,7 @@
     elSubmitBtn.disabled = true;
     elSubmitBtn.textContent = "Подключаем…";
 
-    fetch(API_BASE, {
+    fetchWithRetry(API_BASE, {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
@@ -475,7 +505,11 @@
       .then(function (resp) {
         if (!resp.ok) {
           return resp.json().catch(function () { return {}; }).then(function (data) {
-            throw new Error(data.detail || "Не удалось подключить портал.");
+            // Наш API отдаёт {detail: "..."}, платформенные ошибки Gateway
+            // (например BH_APP_STARTING, если повторные попытки исчерпаны)
+            // отдают {error: {message: "..."}} — учитываем оба формата.
+            var message = data.detail || (data.error && data.error.message) || "Не удалось подключить портал.";
+            throw new Error(message);
           });
         }
         return resp.json();
@@ -510,7 +544,7 @@
     btnEl.disabled = true;
     btnEl.textContent = "Отключаем…";
 
-    fetch(API_BASE + "/" + portalId, { method: "DELETE", credentials: "same-origin" })
+    fetchWithRetry(API_BASE + "/" + portalId, { method: "DELETE", credentials: "same-origin" })
       .then(function (resp) {
         if (!resp.ok && resp.status !== 204) {
           throw new Error("Не удалось отключить портал.");
@@ -590,7 +624,7 @@
 
   // ---------- Загрузка списка ----------
   function loadPortals() {
-    fetch(API_BASE, { credentials: "same-origin" })
+    fetchWithRetry(API_BASE, { credentials: "same-origin" })
       .then(function (resp) {
         if (resp.status === 401) {
           throw new Error("Похоже, страница открыта не через Битрикс24 — авторизация недоступна.");
