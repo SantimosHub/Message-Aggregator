@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 
 from fastapi import Depends, FastAPI
@@ -9,7 +10,7 @@ from .db import init_db
 from .poller import start_poller
 from .routes.portals import router as portals_router
 
-WIDGET_INDEX_PATH = Path(__file__).resolve().parent.parent.parent / "widget" / "index.html"
+WIDGET_INDEX_PATH = Path(__file__).resolve().parent.parent / "widget" / "index.html"
 
 app = FastAPI(title="Bitrix24 Message Aggregator")
 app.include_router(portals_router)
@@ -20,6 +21,16 @@ async def on_startup() -> None:
     """Создаёт таблицы БД при старте, если их ещё нет (Этап 2, PLAN.md)."""
     await init_db()
     app.state.poller_task = start_poller()
+    if not WIDGET_INDEX_PATH.exists():
+        # Файл виджета — часть исходников server/ (см. деплой-скрипт, который
+        # архивирует только server/), так что при правильной сборке эта
+        # проверка никогда не должна сработать. Если сработала — либо путь
+        # опять разъехался с реальной структурой, либо widget/ не попал в
+        # архив деплоя. Логируем явно вместо тихого 500 на первом же
+        # открытии виджета.
+        logging.getLogger("message_aggregator.main").error(
+            "widget/index.html не найден по пути %s — GET / будет отдавать 500", WIDGET_INDEX_PATH
+        )
 
 
 @app.on_event("shutdown")
