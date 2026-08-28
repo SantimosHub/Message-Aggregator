@@ -66,6 +66,27 @@ async def connect_portal(
     body: ConnectPortalRequest,
     owner_user_id: int = Depends(get_current_owner_user_id),
 ) -> PortalResponse:
+    try:
+        return await _connect_portal_impl(body, owner_user_id)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — см. докстринг ниже
+        # По умолчанию необработанное исключение в FastAPI отдаётся как
+        # ПЛОСКИЙ ТЕКСТ "Internal Server Error" без тела JSON — фронтенд не
+        # может показать причину, только резервный "Не удалось подключить
+        # портал." (это и произошло при первом реальном тесте на живом
+        # портале). Ловим здесь и всегда возвращаем JSON с типом+сообщением
+        # исключения — так реальная причина видна прямо в виджете.
+        raise HTTPException(
+            status_code=500,
+            detail=f"Внутренняя ошибка сервера: {type(exc).__name__}: {exc}",
+        ) from exc
+
+
+async def _connect_portal_impl(
+    body: ConnectPortalRequest,
+    owner_user_id: int,
+) -> PortalResponse:
     print(f"[connect_portal] СТАРТ domain={body.domain!r} auth_type={body.auth_type}", flush=True)
 
     # 1. Валидация credentials — до создания чата и записи в БД.
