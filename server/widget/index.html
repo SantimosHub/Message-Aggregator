@@ -215,6 +215,7 @@
   .status-dot.active { background: var(--ok); }
   .status-dot.error { background: var(--error); }
   .status-dot.disabled { background: var(--disabled); }
+  .status-dot.connecting { background: var(--accent); }
 
   /* Сигнатурный элемент: пульсация у активных порталов — портал реально
      опрашивается фоновой задачей каждые ~45 сек (см. server/app/poller.py) */
@@ -227,12 +228,24 @@
     opacity: 0.35;
     animation: pulse 2s ease-out infinite;
   }
+  /* У 'connecting' пульсация быстрее и заметнее — визуально это "процесс
+     в работе", а не устойчивое состояние, как у active */
+  .status-dot.connecting::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    background: var(--accent);
+    opacity: 0.45;
+    animation: pulse 1s ease-out infinite;
+  }
   @keyframes pulse {
     0%   { transform: scale(1);   opacity: 0.35; }
     100% { transform: scale(2.2); opacity: 0; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .status-dot.active::after { animation: none; opacity: 0; }
+    .status-dot.active::after,
+    .status-dot.connecting::after { animation: none; opacity: 0; }
   }
 
   .card-body { flex: 1; min-width: 0; }
@@ -267,6 +280,7 @@
   .status-text.active { color: var(--ok); }
   .status-text.error { color: var(--error); }
   .status-text.disabled { color: var(--disabled); }
+  .status-text.connecting { color: var(--accent); }
 
   .card-error-hint {
     margin-top: 4px;
@@ -560,6 +574,7 @@
 
   // ---------- Отрисовка ----------
   var STATUS_COPY = {
+    connecting: { text: "Подключаем…", hint: "Проверяем доступ и создаём чат — обычно занимает несколько секунд." },
     active: { text: "Работает", hint: null },
     error: { text: "Нужно переподключить", hint: "Ключ или вебхук больше не действует." },
     disabled: { text: "Отключено", hint: null }
@@ -623,6 +638,24 @@
   }
 
   // ---------- Загрузка списка ----------
+  // Пока хотя бы один портал в статусе 'connecting' (проверка credentials и
+  // создание чата идут в фоне на сервере — см. server/app/poller.py,
+  // finish_connecting_portal), опрашиваем список повторно, чтобы UI сам
+  // обновился на active/error без перезагрузки страницы.
+  var CONNECTING_POLL_MS = 2500;
+  var connectingPollTimer = null;
+
+  function scheduleConnectingPollIfNeeded(portals) {
+    if (connectingPollTimer) {
+      clearTimeout(connectingPollTimer);
+      connectingPollTimer = null;
+    }
+    var hasConnecting = portals.some(function (p) { return p.status === "connecting"; });
+    if (hasConnecting) {
+      connectingPollTimer = setTimeout(loadPortals, CONNECTING_POLL_MS);
+    }
+  }
+
   function loadPortals() {
     fetchWithRetry(API_BASE, { credentials: "same-origin" })
       .then(function (resp) {
@@ -640,6 +673,7 @@
         } else {
           renderList(portals);
         }
+        scheduleConnectingPollIfNeeded(portals);
       })
       .catch(function (err) {
         renderLoadError(err.message, loadPortals);

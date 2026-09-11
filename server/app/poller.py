@@ -29,13 +29,102 @@ import asyncio
 import logging
 from datetime import datetime
 
+from .config import get_settings
 from .external_message_fetcher import ExternalPortalApiError, FetchedMessage, fetch_new_messages
+from .external_portal_client import (
+    ExternalPortalCredentialsError,
+    validate_vibe_api_key,
+    validate_webhook,
+)
 from .repositories import external_portals as repo
-from .vibe_client import VibeApiError, send_chat_message
+from .vibe_client import VibeApiError, create_group_chat, send_chat_message
 
 logger = logging.getLogger("message_aggregator.poller")
 
 POLL_INTERVAL_SECONDS = 45  # середина диапазона 30-60 сек из PLAN.md
+
+# asyncio.create_task() хранит только СЛАБУЮ ссылку на задачу на уровне event
+# loop — без сильной ссылки где-то ещё сборщик мусора может оборвать задачу
+# до завершения (задокументированный сюрприз asyncio, см. документацию
+# create_task). Держим тут, чтобы задачи из routes/portals.py гарантированно
+# доработали до конца.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def schedule_finish_connecting(portal: repo.ExternalPortal) -> asyncio.Task:
+    """Запускает finish_connecting_portal как отвязанную от запроса задачу
+    (см. docstring routes/portals.py) и удерживает на неё сильную ссылку,
+    пока она не завершится."""
+    task = asyncio.create_task(finish_connecting_portal(portal))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+async def finish_connecting_portal(portal: repo.ExternalPortal) -> None:
+    """
+    Довершает подключение портала, начатое в POST /api/portals
+    (routes/portals.py): проверяет credentials и создаёт отдельный чат на
+    основном портале.
+
+    КЛЮЧЕВОЕ ОТЛИЧИЕ от старой реализации: этот вызов НЕ является частью
+    обработки входящего туннелированного запроса от Gateway — раньше
+    ровно это (синхронный исходящий вызов прямо в обработчике) надёжно
+    рвало соединение на уровне туннеля (см. external_portal_client.py).
+    Теперь запрос от виджета получает ответ сразу после сохранения записи
+    со статусом 'connecting', а эта функция вызывается:
+    1) немедленно после — отдельной asyncio-задачей (см. routes/portals.py),
+       для быстрого отклика в UI;
+    2) на каждом цикле poll_once() — как подстраховка на случай, если
+       сервер перезапустится/упадёт раньше, чем задача №1 успеет
+       отработать. Идемпотентна: повторный вызов для уже 'active' портала
+       никогда не произойдёт, т.к. list_connecting_portals() отбирает
+       только статус 'connecting'.
+    """
+    try:
+        if portal.auth_type == "vibe_api":
+            await validate_vibe_api_key(portal.credentials)
+        else:
+            await validate_webhook(portal.credentials)
+    except ExternalPortalCredentialsError as exc:
+        logger.warning(
+            "Портал #%s (%s): невалидные credentials, статус -> error: %s",
+            portal.id, portal.domain, exc,
+        )
+        await repo.update_status(portal.id, "error")
+        return
+    except Exception:  # noqa: BLE001 — не должно ронять поллер/задачу
+        logger.exception("Портал #%s (%s): неожиданная ошибка при проверке credentials", portal.id, portal.domain)
+        await repo.update_status(portal.id, "error")
+        return
+
+    settings = get_settings()
+    chat_title = f"{settings.placement_title}: {portal.domain}"
+    try:
+        chat_id = await create_group_chat(title=chat_title, user_ids=[portal.owner_user_id])
+    except VibeApiError as exc:
+        logger.error(
+            "Портал #%s (%s): не удалось создать чат на основном портале: %s",
+            portal.id, portal.domain, exc.payload,
+        )
+        await repo.update_status(portal.id, "error")
+        return
+
+    await repo.mark_portal_active(portal.id, chat_id)
+    logger.info("Портал #%s (%s): подключение завершено, чат %s", portal.id, portal.domain, chat_id)
+
+    # Приветственное сообщение — не критично для успеха подключения,
+    # поэтому ошибку отправки только логируем, портал остаётся active.
+    try:
+        await send_chat_message(
+            chat_id,
+            f"Портал «{portal.domain}» подключён. Сюда будут приходить сообщения сотруднику с этого портала.",
+        )
+    except VibeApiError as exc:
+        logger.warning(
+            "Портал #%s (%s): не удалось отправить приветственное сообщение в чат %s: %s",
+            portal.id, portal.domain, chat_id, exc.payload,
+        )
 
 
 async def _process_portal(portal: repo.ExternalPortal) -> None:
@@ -148,11 +237,20 @@ async def _handle_new_messages(
 
 
 async def poll_once() -> None:
-    """Один проход по всем активным порталам. Порталы обрабатываются параллельно."""
-    portals = await repo.list_active_portals()
-    if not portals:
+    """
+    Один проход: сначала подхватывает застрявшие в 'connecting' порталы
+    (подстраховка на случай рестарта сервера — см. finish_connecting_portal),
+    затем опрашивает 'active' порталы на новые сообщения. Всё выполняется
+    параллельно и не мешает друг другу.
+    """
+    connecting = await repo.list_connecting_portals()
+    active = await repo.list_active_portals()
+    if not connecting and not active:
         return
-    await asyncio.gather(*(_process_portal(p) for p in portals))
+    await asyncio.gather(
+        *(finish_connecting_portal(p) for p in connecting),
+        *(_process_portal(p) for p in active),
+    )
 
 
 async def _poll_loop() -> None:

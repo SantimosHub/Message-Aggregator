@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS external_portals (
     credentials          TEXT NOT NULL,
     main_chat_id         INTEGER,
     last_message_cursor  TEXT NOT NULL DEFAULT '{}',
-    status               TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'error', 'disabled')),
+    status               TEXT NOT NULL DEFAULT 'connecting' CHECK (status IN ('connecting', 'active', 'error', 'disabled')),
     created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -72,8 +72,49 @@ async def get_connection() -> AsyncIterator[aiosqlite.Connection]:
         await conn.close()
 
 
+async def _migrate_connecting_status(conn: aiosqlite.Connection) -> None:
+    """
+    Миграция для уже существующей на сервере БД (файл в /data переживает
+    передеплой, а `CREATE TABLE IF NOT EXISTS` не трогает таблицу, если она
+    уже создана — значит старый CHECK без статуса 'connecting' так и
+    останется действовать, и INSERT со статусом 'connecting' начнёт падать).
+
+    Если в существующей схеме таблицы нет статуса 'connecting' — пересоздаём
+    таблицу с новым CHECK и переносим все строки.
+    """
+    async with conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'external_portals'"
+    ) as cur:
+        row = await cur.fetchone()
+
+    if row is None or row[0] is None or "'connecting'" in row[0]:
+        return  # таблицы ещё нет (создаст SCHEMA) или она уже новая
+
+    await conn.executescript(
+        """
+        ALTER TABLE external_portals RENAME TO external_portals_old;
+        """
+    )
+    await conn.executescript(SCHEMA)
+    await conn.execute(
+        """
+        INSERT INTO external_portals (
+            id, owner_user_id, domain, auth_type, credentials,
+            main_chat_id, last_message_cursor, status, created_at
+        )
+        SELECT
+            id, owner_user_id, domain, auth_type, credentials,
+            main_chat_id, last_message_cursor, status, created_at
+        FROM external_portals_old
+        """
+    )
+    await conn.execute("DROP TABLE external_portals_old")
+    await conn.commit()
+
+
 async def init_db() -> None:
     """Создаёт таблицы, если их ещё нет. Вызывать один раз при старте приложения."""
     async with get_connection() as conn:
         await conn.executescript(SCHEMA)
         await conn.commit()
+        await _migrate_connecting_status(conn)

@@ -1,12 +1,24 @@
 """
 Smoke-тесты Этапа 3 (PLAN.md): подключение внешнего портала.
 Запуск: .venv\\Scripts\\python.exe -m pytest tests/test_stage3_portals.py -v
+
+ПЕРЕПИСАНО вместе с фиксом бага Gateway (см. Контекст.txt, routes/portals.py,
+poller.py): POST /api/portals больше не проверяет credentials и не создаёт
+чат синхронно в обработчике — он сразу сохраняет портал со статусом
+'connecting' и запускает это отдельной asyncio-задачей
+(poller.finish_connecting_portal). Поэтому:
+- validate_vibe_api_key / validate_webhook / create_group_chat / send_chat_message
+  мокаются теперь в модуле app.poller, а не app.routes.portals.
+- После POST статус ещё 'connecting' — тест дожидается завершения фоновой
+  задачи через _wait_for_status() (event loop TestClient'а прокачивается
+  между запросами, моки резолвятся мгновенно, поэтому это быстро).
 """
 from __future__ import annotations
 
 import asyncio
 import os
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -51,12 +63,32 @@ def client():
     app.dependency_overrides.clear()
 
 
+def _wait_for_status(client: TestClient, portal_id: int, *, timeout: float = 2.0) -> dict:
+    """
+    Проверка credentials и создание чата теперь идут в фоновой задаче,
+    запущенной ВНЕ запроса (см. docstring модуля). В тестах вся сеть
+    замокана и резолвится мгновенно, так что фоновая задача успевает
+    выполниться за доли секунды — но статус всё равно опрашиваем в цикле,
+    а не берём как факт сразу после POST.
+    """
+    deadline = time.monotonic() + timeout
+    portal = None
+    while time.monotonic() < deadline:
+        portals = client.get("/api/portals").json()
+        portal = next((p for p in portals if p["id"] == portal_id), None)
+        if portal is not None and portal["status"] != "connecting":
+            return portal
+        time.sleep(0.02)
+    assert portal is not None, "портал не найден после ожидания"
+    return portal
+
+
 class TestConnectPortalVibeApi:
     def test_success_creates_chat_and_saves_encrypted(self, client):
         with (
-            patch("app.routes.portals.validate_vibe_api_key", new_callable=AsyncMock) as val,
-            patch("app.routes.portals.create_group_chat", new_callable=AsyncMock) as chat,
-            patch("app.routes.portals.send_chat_message", new_callable=AsyncMock) as msg,
+            patch("app.poller.validate_vibe_api_key", new_callable=AsyncMock) as val,
+            patch("app.poller.create_group_chat", new_callable=AsyncMock) as chat,
+            patch("app.poller.send_chat_message", new_callable=AsyncMock) as msg,
         ):
             val.return_value = {"scopes": ["im", "imopenlines"], "portal": "ext.example.ru"}
             chat.return_value = 42
@@ -70,14 +102,18 @@ class TestConnectPortalVibeApi:
                     "credentials": "vibe_api_secret123",
                 },
             )
+            assert resp.status_code == 201, resp.text
+            created = resp.json()
+            assert created["status"] == "connecting"
+            assert created["main_chat_id"] is None
+            assert "credentials" not in created
 
-        assert resp.status_code == 201, resp.text
-        data = resp.json()
+            data = _wait_for_status(client, created["id"])
+
         assert data["domain"] == "ext.example.ru"
         assert data["auth_type"] == "vibe_api"
         assert data["main_chat_id"] == 42
         assert data["status"] == "active"
-        assert "credentials" not in data
 
         chat.assert_called_once()
         assert chat.call_args.kwargs["user_ids"] == [OWNER_ID]
@@ -93,11 +129,11 @@ class TestConnectPortalVibeApi:
         assert raw != "vibe_api_secret123"
         assert "vibe_api_secret" not in raw
 
-    def test_invalid_credentials_returns_400_no_db_row(self, client):
+    def test_invalid_credentials_ends_in_error_status(self, client):
         from app.external_portal_client import ExternalPortalCredentialsError
 
         with patch(
-            "app.routes.portals.validate_vibe_api_key",
+            "app.poller.validate_vibe_api_key",
             new_callable=AsyncMock,
             side_effect=ExternalPortalCredentialsError("Ключ невалиден"),
         ):
@@ -105,23 +141,24 @@ class TestConnectPortalVibeApi:
                 "/api/portals",
                 json={"domain": "bad.ru", "auth_type": "vibe_api", "credentials": "bad"},
             )
+            assert resp.status_code == 201  # запрос сохраняется сразу, ошибка выясняется в фоне
+            created = resp.json()
 
-        assert resp.status_code == 400
+            data = _wait_for_status(client, created["id"])
 
-        async def count():
-            async with get_connection() as conn:
-                async with conn.execute("SELECT COUNT(*) AS c FROM external_portals") as cur:
-                    return (await cur.fetchone())["c"]
+        # Запись НЕ удаляется при ошибке — портал просто остаётся видимым
+        # со статусом 'error', чтобы сотрудник мог понять, что случилось,
+        # и переподключить с другими credentials (см. STATUS_COPY в виджете).
+        assert data["status"] == "error"
+        assert data["main_chat_id"] is None
 
-        assert asyncio.run(count()) == 0
-
-    def test_chat_creation_failure_returns_502(self, client):
+    def test_chat_creation_failure_ends_in_error_status(self, client):
         from app.vibe_client import VibeApiError
 
         with (
-            patch("app.routes.portals.validate_vibe_api_key", new_callable=AsyncMock, return_value={"scopes": ["im"]}),
+            patch("app.poller.validate_vibe_api_key", new_callable=AsyncMock, return_value={"scopes": ["im"]}),
             patch(
-                "app.routes.portals.create_group_chat",
+                "app.poller.create_group_chat",
                 new_callable=AsyncMock,
                 side_effect=VibeApiError(502, {"error": "fail"}),
             ),
@@ -130,9 +167,12 @@ class TestConnectPortalVibeApi:
                 "/api/portals",
                 json={"domain": "x.ru", "auth_type": "vibe_api", "credentials": "vibe_api_ok"},
             )
+            created = resp.json()
 
-        assert resp.status_code == 502
-        assert asyncio.run(_count_portals()) == 0
+            data = _wait_for_status(client, created["id"])
+
+        assert data["status"] == "error"
+        assert asyncio.run(_count_portals()) == 1  # запись осталась, просто со статусом error
 
 
 async def _count_portals() -> int:
@@ -144,9 +184,9 @@ async def _count_portals() -> int:
 class TestConnectPortalWebhook:
     def test_success_webhook(self, client):
         with (
-            patch("app.routes.portals.validate_webhook", new_callable=AsyncMock) as val,
-            patch("app.routes.portals.create_group_chat", new_callable=AsyncMock) as chat,
-            patch("app.routes.portals.send_chat_message", new_callable=AsyncMock),
+            patch("app.poller.validate_webhook", new_callable=AsyncMock) as val,
+            patch("app.poller.create_group_chat", new_callable=AsyncMock) as chat,
+            patch("app.poller.send_chat_message", new_callable=AsyncMock),
         ):
             val.return_value = {"result": {"ID": "1"}}
             chat.return_value = 99
@@ -159,39 +199,44 @@ class TestConnectPortalWebhook:
                     "credentials": "https://b24-test.bitrix24.ru/rest/1/abc/",
                 },
             )
+            created = resp.json()
+            data = _wait_for_status(client, created["id"])
 
         assert resp.status_code == 201
-        assert resp.json()["main_chat_id"] == 99
+        assert data["main_chat_id"] == 99
+        assert data["status"] == "active"
 
 
 class TestListAndDelete:
     def test_list_and_delete(self, client):
         with (
-            patch("app.routes.portals.validate_vibe_api_key", new_callable=AsyncMock, return_value={"scopes": ["im"]}),
-            patch("app.routes.portals.create_group_chat", new_callable=AsyncMock, return_value=1),
-            patch("app.routes.portals.send_chat_message", new_callable=AsyncMock),
+            patch("app.poller.validate_vibe_api_key", new_callable=AsyncMock, return_value={"scopes": ["im"]}),
+            patch("app.poller.create_group_chat", new_callable=AsyncMock, return_value=1),
+            patch("app.poller.send_chat_message", new_callable=AsyncMock),
         ):
-            client.post(
+            created = client.post(
                 "/api/portals",
                 json={"domain": "a.ru", "auth_type": "vibe_api", "credentials": "vibe_api_x"},
-            )
+            ).json()
+            _wait_for_status(client, created["id"])
 
         assert len(client.get("/api/portals").json()) == 1
 
-        created = client.get("/api/portals").json()[0]
-        assert client.delete(f"/api/portals/{created['id']}").status_code == 204
+        portal_id = client.get("/api/portals").json()[0]["id"]
+        assert client.delete(f"/api/portals/{portal_id}").status_code == 204
         assert client.get("/api/portals").json() == []
 
     def test_delete_foreign_portal_returns_404(self, client):
         with (
-            patch("app.routes.portals.validate_vibe_api_key", new_callable=AsyncMock, return_value={"scopes": ["im"]}),
-            patch("app.routes.portals.create_group_chat", new_callable=AsyncMock, return_value=8),
-            patch("app.routes.portals.send_chat_message", new_callable=AsyncMock),
+            patch("app.poller.validate_vibe_api_key", new_callable=AsyncMock, return_value={"scopes": ["im"]}),
+            patch("app.poller.create_group_chat", new_callable=AsyncMock, return_value=8),
+            patch("app.poller.send_chat_message", new_callable=AsyncMock),
         ):
             created = client.post(
                 "/api/portals",
                 json={"domain": "x.ru", "auth_type": "vibe_api", "credentials": "vibe_api_z"},
             ).json()
+            _wait_for_status(client, created["id"])
 
         app.dependency_overrides[get_current_owner_user_id] = lambda: 99999
         assert client.delete(f"/api/portals/{created['id']}").status_code == 404
