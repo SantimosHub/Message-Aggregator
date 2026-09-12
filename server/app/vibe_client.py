@@ -1,9 +1,21 @@
 """
 Тонкий клиент для вызова API Вайбкод (https://vibecode.bitrix24.tech/v1).
 
-Используется для:
-- определения личности сотрудника, открывшего виджет (GET /v1/me с сессией из Gateway);
-- (позже, Этап 3+) создания чатов и отправки сообщений от имени приложения.
+ДВА РАЗНЫХ КЛЮЧА, НЕ ПУТАТЬ (см. config.py и
+https://vibecode.bitrix24.tech/docs/keys-auth):
+
+- vibe_app_key (vibe_app_...) — ключ авторизации, встраивание виджета в
+  интерфейс Битрикс24 + определение личности сотрудника через Gateway
+  (X-Vibe-Authorization -> GET /v1/me с Bearer сессионным токеном).
+  Используется в get_me() и bind_placement()/exchange_code_for_session().
+
+- vibe_api_key (vibe_api_...) — личный API-ключ, для ФОНОВЫХ операций:
+  создание чата и отправка сообщений (create_group_chat, send_chat_message).
+  Работает одним X-Api-Key, БЕЗ Bearer — что и требуется для планового
+  опроса раз в ~45 сек, когда за экраном никого нет и обновить 24-часовую
+  сессию vibe_app_ некому (см. подробный комментарий в config.py — это
+  ровно та причина, по которой первая версия с vibe_app_key падала с
+  TOKEN_MISSING на создании чата).
 """
 from __future__ import annotations
 
@@ -35,9 +47,9 @@ async def _request(method: str, path: str, *, headers: dict, json: dict | None =
 
 async def create_group_chat(title: str, user_ids: list[int]) -> int:
     """
-    POST /v1/chats — создаёт групповой чат (im.chat.add). Только X-Api-Key
-    (vibe_app_...), сессия НЕ нужна — фоновая операция от имени приложения
-    (см. README, раздел 9). Возвращает числовой chatId.
+    POST /v1/chats — создаёт групповой чат (im.chat.add). Личный API-ключ
+    (vibe_api_...), только X-Api-Key — см. docstring модуля про выбор ключа
+    для фоновых операций. Возвращает числовой chatId.
 
     Используется на Этапе 3: один отдельный чат на каждый подключаемый
     сотрудником внешний портал (README, раздел 1).
@@ -46,7 +58,7 @@ async def create_group_chat(title: str, user_ids: list[int]) -> int:
     data = await _request(
         "POST",
         "/v1/chats",
-        headers={"X-Api-Key": settings.vibe_app_key},
+        headers={"X-Api-Key": settings.vibe_api_key},
         json={"title": title, "users": user_ids},
     )
     return data["data"]
@@ -55,14 +67,15 @@ async def create_group_chat(title: str, user_ids: list[int]) -> int:
 async def send_chat_message(chat_id: int, text: str) -> int:
     """
     POST /v1/chats/chat{chatId}/messages — отправляет сообщение в групповой чат
-    (im.message.add). Возвращает ID отправленного сообщения.
+    (im.message.add). Личный API-ключ (vibe_api_...) — см. create_group_chat.
+    Возвращает ID отправленного сообщения.
     """
     settings = get_settings()
     dialog_id = f"chat{chat_id}"
     data = await _request(
         "POST",
         f"/v1/chats/{dialog_id}/messages",
-        headers={"X-Api-Key": settings.vibe_app_key},
+        headers={"X-Api-Key": settings.vibe_api_key},
         json={"message": text},
     )
     return data["data"]
