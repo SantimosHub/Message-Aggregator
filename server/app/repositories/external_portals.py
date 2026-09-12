@@ -34,6 +34,7 @@ class ExternalPortal:
     main_chat_id: Optional[int]
     last_message_cursor: dict[str, str]  # {dialog_id: last_message_id}
     status: PortalStatus
+    error_message: Optional[str]  # причина последней ошибки подключения/опроса, для UI
     created_at: str
 
 
@@ -47,6 +48,7 @@ def _row_to_portal(row: aiosqlite.Row) -> ExternalPortal:
         main_chat_id=row["main_chat_id"],
         last_message_cursor=json.loads(row["last_message_cursor"]),
         status=row["status"],
+        error_message=row["error_message"],
         created_at=row["created_at"],
     )
 
@@ -130,11 +132,27 @@ async def list_connecting_portals() -> list[ExternalPortal]:
 async def mark_portal_active(portal_id: int, main_chat_id: int) -> None:
     """Переводит портал из 'connecting' в 'active' и сохраняет id созданного
     чата — одной атомарной операцией, чтобы не было промежуточного состояния
-    'active' без main_chat_id."""
+    'active' без main_chat_id. error_message сбрасывается, если это был
+    повторный успешный коннект после ошибки."""
     async with get_connection() as conn:
         await conn.execute(
-            "UPDATE external_portals SET status = 'active', main_chat_id = ? WHERE id = ?",
+            "UPDATE external_portals SET status = 'active', main_chat_id = ?, error_message = NULL WHERE id = ?",
             (main_chat_id, portal_id),
+        )
+        await conn.commit()
+
+
+async def mark_portal_error(portal_id: int, error_message: str) -> None:
+    """
+    Переводит портал в статус 'error' и сохраняет ПОНЯТНУЮ причину — виджет
+    показывает её напрямую сотруднику. Это единственный способ узнать причину
+    сбоя: в личном кабинете Вайбкода нет доступа к логам приложения, только
+    журнал HTTP-доступа (выяснено на практике).
+    """
+    async with get_connection() as conn:
+        await conn.execute(
+            "UPDATE external_portals SET status = 'error', error_message = ? WHERE id = ?",
+            (error_message[:500], portal_id),
         )
         await conn.commit()
 

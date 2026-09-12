@@ -26,6 +26,7 @@ def _portal(**overrides) -> ExternalPortal:
         main_chat_id=42,
         last_message_cursor={},
         status="active",
+        error_message=None,
         created_at="2026-01-01 00:00:00",
     )
     defaults.update(overrides)
@@ -180,11 +181,11 @@ class TestPollerIsolatesFailures:
 
         with (
             patch("app.poller.fetch_new_messages", side_effect=fake_fetch),
-            patch("app.poller.repo.update_status", new_callable=AsyncMock) as update_status,
+            patch("app.poller.repo.mark_portal_error", new_callable=AsyncMock) as mark_error,
             patch("app.poller.repo.update_cursor", new_callable=AsyncMock),
         ):
             await _process_portal(ok_portal)
             await _process_portal(bad_portal)
 
         assert calls == [1, 2]
-        update_status.assert_called_once_with(2, "error")
+        mark_error.assert_called_once_with(2, "ключ отозван")

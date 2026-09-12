@@ -91,11 +91,11 @@ async def finish_connecting_portal(portal: repo.ExternalPortal) -> None:
             "Портал #%s (%s): невалидные credentials, статус -> error: %s",
             portal.id, portal.domain, exc,
         )
-        await repo.update_status(portal.id, "error")
+        await repo.mark_portal_error(portal.id, str(exc))
         return
-    except Exception:  # noqa: BLE001 — не должно ронять поллер/задачу
+    except Exception as exc:  # noqa: BLE001 — не должно ронять поллер/задачу
         logger.exception("Портал #%s (%s): неожиданная ошибка при проверке credentials", portal.id, portal.domain)
-        await repo.update_status(portal.id, "error")
+        await repo.mark_portal_error(portal.id, f"{type(exc).__name__}: {exc}")
         return
 
     settings = get_settings()
@@ -107,7 +107,11 @@ async def finish_connecting_portal(portal: repo.ExternalPortal) -> None:
             "Портал #%s (%s): не удалось создать чат на основном портале: %s",
             portal.id, portal.domain, exc.payload,
         )
-        await repo.update_status(portal.id, "error")
+        await repo.mark_portal_error(portal.id, f"Не удалось создать чат на основном портале: {exc.payload}")
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Портал #%s (%s): неожиданная ошибка при создании чата", portal.id, portal.domain)
+        await repo.mark_portal_error(portal.id, f"Ошибка при создании чата: {type(exc).__name__}: {exc}")
         return
 
     await repo.mark_portal_active(portal.id, chat_id)
@@ -136,7 +140,7 @@ async def _process_portal(portal: repo.ExternalPortal) -> None:
                 "Портал #%s (%s): ключ/вебхук недействителен, статус -> error: %s",
                 portal.id, portal.domain, exc,
             )
-            await repo.update_status(portal.id, "error")
+            await repo.mark_portal_error(portal.id, str(exc))
         else:
             logger.warning("Портал #%s (%s): временная ошибка опроса: %s", portal.id, portal.domain, exc)
         return

@@ -26,6 +26,7 @@ def _portal(**overrides) -> ExternalPortal:
         main_chat_id=42,
         last_message_cursor={},
         status="active",
+        error_message=None,
         created_at="2026-01-01 00:00:00",
     )
     defaults.update(overrides)

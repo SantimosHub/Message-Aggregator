@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS external_portals (
     main_chat_id         INTEGER,
     last_message_cursor  TEXT NOT NULL DEFAULT '{}',
     status               TEXT NOT NULL DEFAULT 'connecting' CHECK (status IN ('connecting', 'active', 'error', 'disabled')),
+    error_message        TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -112,9 +113,28 @@ async def _migrate_connecting_status(conn: aiosqlite.Connection) -> None:
     await conn.commit()
 
 
+async def _migrate_error_message_column(conn: aiosqlite.Connection) -> None:
+    """
+    Добавляет колонку error_message, если её ещё нет (для БД, созданных до
+    этого поля). В отличие от смены CHECK-констрейнта, добавление обычной
+    nullable-колонки SQLite умеет через ALTER TABLE ADD COLUMN — без
+    пересоздания таблицы.
+
+    Нужно для диагностики: в личном кабинете Вайбкода нет доступа к логам
+    приложения (только журнал HTTP-доступа), поэтому причина ошибки
+    подключения портала должна быть видна прямо в виджете.
+    """
+    async with conn.execute("PRAGMA table_info(external_portals)") as cur:
+        columns = {row[1] async for row in cur}
+    if "error_message" not in columns:
+        await conn.execute("ALTER TABLE external_portals ADD COLUMN error_message TEXT")
+        await conn.commit()
+
+
 async def init_db() -> None:
     """Создаёт таблицы, если их ещё нет. Вызывать один раз при старте приложения."""
     async with get_connection() as conn:
         await conn.executescript(SCHEMA)
         await conn.commit()
         await _migrate_connecting_status(conn)
+        await _migrate_error_message_column(conn)

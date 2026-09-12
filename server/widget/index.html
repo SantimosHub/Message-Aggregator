@@ -604,6 +604,10 @@
     var html = '<div class="list">';
     portals.forEach(function (p) {
       var statusCopy = STATUS_COPY[p.status] || { text: p.status, hint: null };
+      // Реальный текст ошибки из БД (см. mark_portal_error в repositories/external_portals.py)
+      // приоритетнее статичной подсказки — в личном кабинете Вайбкода нет логов приложения,
+      // это единственный способ сотруднику увидеть, что именно пошло не так.
+      var hint = p.error_message ? escapeHtml(p.error_message) : statusCopy.hint;
       html +=
         '<div class="card">' +
         '<span class="status-dot ' + p.status + '"></span>' +
@@ -613,7 +617,7 @@
         '<span class="chip">' + (AUTH_TYPE_LABEL[p.auth_type] || p.auth_type) + '</span>' +
         '<span class="status-text ' + p.status + '">' + statusCopy.text + '</span>' +
         '</div>' +
-        (statusCopy.hint ? '<div class="card-error-hint">' + statusCopy.hint + '</div>' : '') +
+        (hint ? '<div class="card-error-hint">' + hint + '</div>' : '') +
         '</div>' +
         '<button class="btn-danger-text" data-portal-id="' + p.id + '" type="button">Отключить</button>' +
         '</div>';

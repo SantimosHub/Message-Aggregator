@@ -44,6 +44,7 @@ class PortalResponse(BaseModel):
     auth_type: str
     main_chat_id: Optional[int]
     status: str
+    error_message: Optional[str]
     created_at: str
 
     @classmethod
@@ -55,6 +56,7 @@ class PortalResponse(BaseModel):
             auth_type=portal.auth_type,
             main_chat_id=portal.main_chat_id,
             status=portal.status,
+            error_message=portal.error_message,
             created_at=portal.created_at,
         )
 
