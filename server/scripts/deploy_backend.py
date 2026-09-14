@@ -55,6 +55,7 @@ EXCLUDE_NAMES = {".env", "__pycache__", ".venv", "venv", ".git", ".pytest_cache"
 # (это ОТДЕЛЬНО от VIBE_API_KEY, который используется только здесь, локально, для деплоя).
 ENV_VARS_TO_FORWARD = [
     "VIBE_APP_KEY",
+    "VIBE_BACKGROUND_API_KEY",
     "VIBE_API_BASE_URL",
     "APP_BASE_URL",
     "PLACEMENT_TITLE",

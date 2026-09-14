@@ -16,7 +16,7 @@ import aiosqlite
 from ..crypto import decrypt_credentials, encrypt_credentials
 from ..db import get_connection
 
-AuthType = Literal["vibe_api", "webhook"]
+AuthType = Literal["webhook"]  # vibe_api как способ авторизации внешнего портала убран, см. external_portal_client.py
 # 'connecting' — переходный статус сразу после POST /api/portals, пока
 # проверка credentials и создание чата ещё не завершились в фоне (см.
 # routes/portals.py и poller.finish_connecting_portal — фикс бага Gateway
@@ -35,6 +35,7 @@ class ExternalPortal:
     last_message_cursor: dict[str, str]  # {dialog_id: last_message_id}
     status: PortalStatus
     error_message: Optional[str]  # причина последней ошибки подключения/опроса, для UI
+    owner_external_user_id: Optional[str]  # ID сотрудника НА ВНЕШНЕМ портале (webhook), для пометки "свои" сообщения прочитанными
     created_at: str
 
 
@@ -49,6 +50,7 @@ def _row_to_portal(row: aiosqlite.Row) -> ExternalPortal:
         last_message_cursor=json.loads(row["last_message_cursor"]),
         status=row["status"],
         error_message=row["error_message"],
+        owner_external_user_id=row["owner_external_user_id"],
         created_at=row["created_at"],
     )
 
@@ -153,6 +155,20 @@ async def mark_portal_error(portal_id: int, error_message: str) -> None:
         await conn.execute(
             "UPDATE external_portals SET status = 'error', error_message = ? WHERE id = ?",
             (error_message[:500], portal_id),
+        )
+        await conn.commit()
+
+
+async def set_owner_external_user_id(portal_id: int, owner_external_user_id: str) -> None:
+    """Сохраняет числовой ID сотрудника на ВНЕШНЕМ портале (из ответа
+    profile.json при подключении по вебхуку — см.
+    poller.finish_connecting_portal). Используется для пометки дайджестов,
+    целиком состоящих из собственных сообщений сотрудника, прочитанными
+    (poller._handle_new_messages) — см. docstring колонки в db.py."""
+    async with get_connection() as conn:
+        await conn.execute(
+            "UPDATE external_portals SET owner_external_user_id = ? WHERE id = ?",
+            (owner_external_user_id, portal_id),
         )
         await conn.commit()
 

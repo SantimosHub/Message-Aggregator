@@ -25,12 +25,19 @@ CREATE TABLE IF NOT EXISTS external_portals (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
     owner_user_id        INTEGER NOT NULL,
     domain               TEXT NOT NULL,
+    -- CHECK намеренно оставлен разрешающим оба значения, хотя 'vibe_api' как
+    -- способ авторизации внешнего портала убран из API и виджета (см.
+    -- routes/portals.py, external_portal_client.py) — сужение CHECK
+    -- потребовало бы деструктивной миграции существующей таблицы (как для
+    -- 'connecting' в _migrate_connecting_status) ради поля, которое больше
+    -- никогда не будет писаться новым кодом. Не стоит того риска.
     auth_type            TEXT NOT NULL CHECK (auth_type IN ('vibe_api', 'webhook')),
     credentials          TEXT NOT NULL,
     main_chat_id         INTEGER,
     last_message_cursor  TEXT NOT NULL DEFAULT '{}',
     status               TEXT NOT NULL DEFAULT 'connecting' CHECK (status IN ('connecting', 'active', 'error', 'disabled')),
     error_message        TEXT,
+    owner_external_user_id TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -131,6 +138,24 @@ async def _migrate_error_message_column(conn: aiosqlite.Connection) -> None:
         await conn.commit()
 
 
+async def _migrate_owner_external_user_id_column(conn: aiosqlite.Connection) -> None:
+    """
+    Добавляет колонку owner_external_user_id, если её ещё нет. Хранит
+    числовой ID сотрудника НА ВНЕШНЕМ портале (для webhook — из ответа
+    profile.json при подключении, см. poller.finish_connecting_portal).
+
+    Нужно, чтобы отличать в дайджесте собственные сообщения сотрудника на
+    внешнем портале от сообщений собеседника — целиком "свои" дайджесты
+    сразу помечаются прочитанными (poller._handle_new_messages), чтобы не
+    создавать шум "непрочитанное" на словах, которые человек сам написал.
+    """
+    async with conn.execute("PRAGMA table_info(external_portals)") as cur:
+        columns = {row[1] async for row in cur}
+    if "owner_external_user_id" not in columns:
+        await conn.execute("ALTER TABLE external_portals ADD COLUMN owner_external_user_id TEXT")
+        await conn.commit()
+
+
 async def init_db() -> None:
     """Создаёт таблицы, если их ещё нет. Вызывать один раз при старте приложения."""
     async with get_connection() as conn:
@@ -138,3 +163,4 @@ async def init_db() -> None:
         await conn.commit()
         await _migrate_connecting_status(conn)
         await _migrate_error_message_column(conn)
+        await _migrate_owner_external_user_id_column(conn)

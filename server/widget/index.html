@@ -155,6 +155,17 @@
     font-family: var(--font-body);
   }
 
+  .field .hint ol {
+    margin: 4px 0 0;
+    padding-left: 16px;
+  }
+  .field .hint li {
+    margin-top: 2px;
+  }
+  .field .hint code {
+    font-size: 11px;
+  }
+
   .segmented {
     display: inline-flex;
     border: 1px solid var(--border);
@@ -362,17 +373,16 @@
     </div>
 
     <div class="field">
-      <label id="auth-type-label">Способ авторизации</label>
-      <div class="segmented" role="group" aria-labelledby="auth-type-label">
-        <button type="button" class="active" data-auth-type="vibe_api">Ключ Вайбкод</button>
-        <button type="button" data-auth-type="webhook">Вебхук</button>
+      <label for="credentials-input" id="credentials-label">URL вебхука</label>
+      <input type="text" id="credentials-input" name="credentials" placeholder="https://портал.bitrix24.ru/rest/1/токен/" autocomplete="off" />
+      <div class="hint" id="credentials-hint">
+        Как создать вебхук на портале-источнике:
+        <ol>
+          <li>Раздел «Разработчикам» → «Другое» → «Входящий вебхук»</li>
+          <li>Отметьте разделы <code>Мессенджер (im)</code> и <code>Открытые линии (imopenlines)</code></li>
+          <li>Скопируйте выданную ссылку целиком, вместе со слэшем на конце</li>
+        </ol>
       </div>
-    </div>
-
-    <div class="field">
-      <label for="credentials-input" id="credentials-label">Ключ vibe_api_...</label>
-      <input type="text" id="credentials-input" name="credentials" placeholder="vibe_api_..." autocomplete="off" />
-      <div class="hint" id="credentials-hint">Ключ авторизации со скоупом <code>im</code>, выпущенный на портале-источнике.</div>
     </div>
 
     <div class="form-actions">
@@ -435,35 +445,6 @@
   var elFormError = document.getElementById("form-error");
   var elDomainInput = document.getElementById("domain-input");
   var elCredentialsInput = document.getElementById("credentials-input");
-  var elCredentialsLabel = document.getElementById("credentials-label");
-  var elCredentialsHint = document.getElementById("credentials-hint");
-  var elAuthButtons = elForm.querySelectorAll("[data-auth-type]");
-
-  var authType = "vibe_api";
-  var AUTH_COPY = {
-    vibe_api: {
-      label: "Ключ vibe_api_...",
-      placeholder: "vibe_api_...",
-      hint: "Ключ авторизации со скоупом <code>im</code>, выпущенный на портале-источнике."
-    },
-    webhook: {
-      label: "URL вебхука",
-      placeholder: "https://портал.bitrix24.ru/rest/1/токен/",
-      hint: "Входящий вебхук с правами <code>im</code> на портале-источнике."
-    }
-  };
-
-  // ---------- Переключение способа авторизации ----------
-  elAuthButtons.forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      authType = btn.getAttribute("data-auth-type");
-      elAuthButtons.forEach(function (b) { b.classList.toggle("active", b === btn); });
-      var copy = AUTH_COPY[authType];
-      elCredentialsLabel.textContent = copy.label;
-      elCredentialsInput.placeholder = copy.placeholder;
-      elCredentialsHint.innerHTML = copy.hint;
-    });
-  });
 
   // ---------- Открытие/закрытие формы ----------
   function openForm() {
@@ -502,7 +483,7 @@
       return;
     }
     if (!credentials) {
-      showFormError(authType === "vibe_api" ? "Укажите ключ Вайбкод." : "Укажите URL вебхука.");
+      showFormError("Укажите URL вебхука.");
       elCredentialsInput.focus();
       return;
     }
@@ -514,7 +495,7 @@
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ domain: domain, auth_type: authType, credentials: credentials })
+      body: JSON.stringify({ domain: domain, auth_type: "webhook", credentials: credentials })
     })
       .then(function (resp) {
         if (!resp.ok) {

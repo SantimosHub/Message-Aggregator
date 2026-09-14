@@ -27,6 +27,7 @@ def _portal(**overrides) -> ExternalPortal:
         last_message_cursor={},
         status="active",
         error_message=None,
+        owner_external_user_id=None,
         created_at="2026-01-01 00:00:00",
     )
     defaults.update(overrides)
@@ -144,6 +145,48 @@ class TestFetchNewMessagesOpenLine:
         assert [m.message_id for m in messages] == [48, 50]
         assert messages[1].is_open_line is True
         assert new_cursor == {"chat2001": "50"}
+
+    @pytest.mark.asyncio
+    async def test_open_line_skips_system_messages(self):
+        """
+        senderid == "0" — служебные события чата (создание лида, смена
+        названия и т.п.), подтверждено примером ответа в официальной
+        документации Битрикс24 (imopenlines.session.history.get). Их не
+        нужно пересылать как будто это сообщение от "Клиента #0".
+        """
+        recent = {
+            "items": [
+                {
+                    "id": "chat2002",
+                    "chat_id": 2002,
+                    "type": "chat",
+                    "title": "Open line #2002",
+                    "message": {"id": 51, "text": "last"},
+                    "lines": {"id": 1, "status": 1},
+                }
+            ]
+        }
+        history = {
+            "message": {
+                "49": {"id": "49", "senderid": "0", "text": "Сервисный аккаунт изменил название чата", "date": "x"},
+                "51": {"id": "51", "senderid": "586", "text": "реальное сообщение клиента", "date": "x"},
+            }
+        }
+
+        async def fake_call(portal_arg, method, params):
+            if method == "im.recent.list":
+                return recent
+            if method == "imopenlines.session.history.get":
+                return history
+            raise AssertionError(f"unexpected method {method}")
+
+        portal = _portal(last_message_cursor={"chat2002": "40"})
+        with patch("app.external_message_fetcher._call_method", side_effect=fake_call):
+            messages, new_cursor = await fetch_new_messages(portal)
+
+        assert [m.message_id for m in messages] == [51]
+        assert messages[0].text == "реальное сообщение клиента"
+        assert new_cursor == {"chat2002": "51"}
 
 
 class TestAuthErrorPropagation:

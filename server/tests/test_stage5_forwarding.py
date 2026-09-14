@@ -27,6 +27,7 @@ def _portal(**overrides) -> ExternalPortal:
         last_message_cursor={},
         status="active",
         error_message=None,
+        owner_external_user_id=None,
         created_at="2026-01-01 00:00:00",
     )
     defaults.update(overrides)
@@ -39,6 +40,7 @@ def _msg(**overrides) -> FetchedMessage:
         dialog_title="Support chat",
         is_open_line=False,
         message_id=1,
+        author_id="501",
         author_name="Иван Петров",
         text="привет",
         date="2026-01-01T10:15:00+01:00",
@@ -56,6 +58,10 @@ class TestFormatDigest:
         assert "10:15 01.01.2026" in text
         assert "привет" in text
         assert "https://ext.example.ru/online/?IM_DIALOG=chat1317" in text
+        # BB-код [url=...]...[/url] вместо голой ссылки — иначе Битрикс24
+        # разворачивает голый URL в большую карточку-превью на каждое
+        # сообщение (см. poller.py, _format_digest).
+        assert "[url=https://ext.example.ru/online/?IM_DIALOG=chat1317]Открыть диалог[/url]" in text
 
     def test_multiple_messages_are_ordered_chronologically_regardless_of_input_order(self):
         portal = _portal()
@@ -128,6 +134,74 @@ class TestHandleNewMessagesBatching:
             delivered = await _handle_new_messages(portal, msgs)
 
         assert delivered == {"chat_ok": 1}  # chat_bad не попал в delivered
+
+
+class TestMarkOwnMessagesRead:
+    """
+    Если дайджест диалога целиком состоит из сообщений самого владельца
+    вебхука (сотрудник сам отвечал собеседнику на внешнем портале) —
+    дайджест сразу помечается прочитанным (см. poller._handle_new_messages).
+    Работает только когда known owner_external_user_id (то есть для
+    webhook-порталов, см. finish_connecting_portal).
+    """
+
+    @pytest.mark.asyncio
+    async def test_digest_entirely_from_owner_is_marked_read(self):
+        portal = _portal(owner_external_user_id="501")
+        msgs = [_msg(message_id=1, author_id="501"), _msg(message_id=2, author_id="501")]
+
+        with (
+            patch("app.poller.send_chat_message", new_callable=AsyncMock, return_value=777),
+            patch("app.poller.mark_message_read", new_callable=AsyncMock) as mark_read,
+        ):
+            await _handle_new_messages(portal, msgs)
+
+        mark_read.assert_called_once_with(portal.main_chat_id, 777)
+
+    @pytest.mark.asyncio
+    async def test_digest_mixed_authors_not_marked_read(self):
+        portal = _portal(owner_external_user_id="501")
+        msgs = [_msg(message_id=1, author_id="501"), _msg(message_id=2, author_id="999")]
+
+        with (
+            patch("app.poller.send_chat_message", new_callable=AsyncMock, return_value=777),
+            patch("app.poller.mark_message_read", new_callable=AsyncMock) as mark_read,
+        ):
+            await _handle_new_messages(portal, msgs)
+
+        mark_read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_owner_external_user_id_never_marks_read(self):
+        """Порталы без owner_external_user_id (например, если поле ещё не заполнилось) — поведение как раньше."""
+        portal = _portal(owner_external_user_id=None)
+        msgs = [_msg(message_id=1, author_id="501")]
+
+        with (
+            patch("app.poller.send_chat_message", new_callable=AsyncMock, return_value=777),
+            patch("app.poller.mark_message_read", new_callable=AsyncMock) as mark_read,
+        ):
+            await _handle_new_messages(portal, msgs)
+
+        mark_read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mark_read_failure_does_not_affect_delivered(self):
+        """Ошибка пометки прочитанным не критична — сообщение уже доставлено, курсор всё равно продвигается."""
+        portal = _portal(owner_external_user_id="501")
+        msgs = [_msg(message_id=1, author_id="501")]
+
+        with (
+            patch("app.poller.send_chat_message", new_callable=AsyncMock, return_value=777),
+            patch(
+                "app.poller.mark_message_read",
+                new_callable=AsyncMock,
+                side_effect=VibeApiError(500, {"error": "boom"}),
+            ),
+        ):
+            delivered = await _handle_new_messages(portal, msgs)
+
+        assert delivered == {"chat1317": 1}
 
 
 class TestCursorIdempotency:

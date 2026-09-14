@@ -34,8 +34,10 @@ router = APIRouter(prefix="/api/portals", tags=["external-portals"])
 
 class ConnectPortalRequest(BaseModel):
     domain: str = Field(..., min_length=1, description="Домен внешнего портала, для отображения")
-    auth_type: Literal["vibe_api", "webhook"]
-    credentials: str = Field(..., min_length=1, description="Ключ vibe_api_... или URL вебхука")
+    # Единственный способ авторизации — webhook (см. external_portal_client.py
+    # про то, почему vibe_api как вариант авторизации внешнего портала убран).
+    auth_type: Literal["webhook"] = "webhook"
+    credentials: str = Field(..., min_length=1, description="URL вебхука")
 
 
 class PortalResponse(BaseModel):

@@ -10,18 +10,14 @@
   открытой линии, не будучи участником чата — подтверждено документацией
   Битрикс24 REST).
 
-Способ вызова методов зависит от auth_type записи (README, раздел 2):
-- `webhook` — напрямую REST Битрикс24 на домене портала, синхронным
-  `requests` в отдельном потоке (см. external_portal_client.py — обходной
-  путь вокруг обрыва соединения Gateway на произвольные внешние домены).
-- `vibe_api` — через платформу Вайбкод, `POST /v1/batch` (см. PLAN.md,
-  Этап 4). ВАЖНО: конкретный контракт этого прокси-эндпоинта для
-  произвольных REST-методов (не задокументированных в открытом Entity API)
-  не был проверен вживую в рамках этой сессии — реализация ниже следует
-  стандартному формату Битрикс batch (`cmd: {alias: "method?querystring"}`)
-  по аналогии с уже подтверждёнными вызовами `/v1/chats`. Перед боевым
-  использованием обязательно проверить одним реальным vibe_api-порталом
-  (см. Этап 7 плана) и поправить `_vibe_batch_call`, если формат отличается.
+Все вызовы идут через входящий вебхук напрямую на REST Битрикс24 домена
+портала, синхронным `requests` в отдельном потоке (см.
+external_portal_client.py — обходной путь вокруг обрыва соединения Gateway
+на произвольные внешние домены). Авторизация через личный ключ Вайбкод
+(`vibe_api`) как способ подключения внешнего портала убрана — контракт
+прокси-эндпоинта `/v1/batch` для этого сценария не был проверен вживую, и
+через него не определить ID сотрудника на внешнем портале для пометки
+собственных сообщений прочитанными (см. db.py, owner_external_user_id).
 
 Логика курсора (см. README, раздел 4.3):
 - `last_message_cursor` — JSON-карта {dialog_id: last_message_id}.
@@ -34,14 +30,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from urllib.parse import urlencode
+from typing import Optional
 
-import httpx
 import requests
 
 from .repositories.external_portals import ExternalPortal
-
-VIBE_API_BASE_URL = "https://vibecode.bitrix24.tech"
 
 
 class ExternalPortalApiError(Exception):
@@ -58,13 +51,14 @@ class FetchedMessage:
     dialog_title: str
     is_open_line: bool
     message_id: int
+    author_id: Optional[str]  # числовой ID автора НА ВНЕШНЕМ портале (str или None) — для сравнения с owner_external_user_id
     author_name: str
     text: str
     date: str
 
 
 # --------------------------------------------------------------------------
-# Низкоуровневые вызовы методов Битрикс24, в зависимости от auth_type.
+# Низкоуровневый вызов методов Битрикс24 через входящий вебхук.
 # --------------------------------------------------------------------------
 
 
@@ -96,43 +90,8 @@ async def _webhook_call(webhook_url: str, method: str, params: dict) -> dict:
     return data.get("result", {})
 
 
-async def _vibe_batch_call(vibe_api_key: str, method: str, params: dict) -> dict:
-    """
-    Вызов произвольного REST-метода внешнего портала через Vibe API,
-    POST /v1/batch (см. предупреждение в докстринге модуля выше — контракт
-    не проверен вживую, следует стандартному формату Битрикс batch).
-    """
-    cmd_value = method if not params else f"{method}?{urlencode(params)}"
-    body = {"halt": 0, "cmd": {"call": cmd_value}}
-
-    async with httpx.AsyncClient(base_url=VIBE_API_BASE_URL, timeout=20) as client:
-        resp = await client.post("/v1/batch", headers={"X-Api-Key": vibe_api_key}, json=body)
-
-    try:
-        data = resp.json()
-    except ValueError as exc:
-        raise ExternalPortalApiError(f"Vibe API вернул не-JSON ответ ({method})") from exc
-
-    if resp.status_code in (401, 403):
-        raise ExternalPortalApiError(
-            f"Ключ vibe_api невалиден/отозван ({method}): {data}", is_auth_error=True
-        )
-    if resp.status_code >= 400 or not data.get("success", True):
-        raise ExternalPortalApiError(f"Ошибка Vibe API ({method}): {data}")
-
-    # Формат batch-ответа Битрикс24: result.result[alias] — сам результат,
-    # result.result_error[alias] — ошибка конкретного под-вызова.
-    result = data.get("data") or data.get("result") or {}
-    batch_result = result.get("result", result)
-    if isinstance(batch_result, dict) and "result_error" in result and result["result_error"].get("call"):
-        raise ExternalPortalApiError(f"Ошибка метода {method} внутри batch: {result['result_error']['call']}")
-    return batch_result.get("call", batch_result) if isinstance(batch_result, dict) else batch_result
-
-
 async def _call_method(portal: ExternalPortal, method: str, params: dict) -> dict:
-    if portal.auth_type == "webhook":
-        return await _webhook_call(portal.credentials, method, params)
-    return await _vibe_batch_call(portal.credentials, method, params)
+    return await _webhook_call(portal.credentials, method, params)
 
 
 # --------------------------------------------------------------------------
@@ -167,6 +126,7 @@ async def _fetch_regular_dialog_messages(
                 dialog_title=dialog_id,
                 is_open_line=False,
                 message_id=msg_id,
+                author_id=str(msg.get("author_id")) if msg.get("author_id") is not None else None,
                 author_name=_author_display_name(msg.get("author_id"), users_map),
                 text=msg.get("text", ""),
                 date=msg.get("date", ""),
@@ -186,12 +146,21 @@ async def _fetch_open_line_messages(
         msg_id = int(msg_id_str)
         if msg_id <= after_id:
             continue
+        # senderid == "0" — служебные события чата открытой линии (создание
+        # лида, смена названия и т.п.), а не сообщения клиента. Подтверждено
+        # официальной документацией Битрикс24 (пример ответа
+        # imopenlines.session.history.get: senderid":"0" на сообщении
+        # "[b]Создан новый лид[/b]"). Такие события не пересылаем — иначе
+        # они выглядят как будто их написал "Клиент открытой линии #0".
+        if str(msg.get("senderid")) == "0":
+            continue
         fetched.append(
             FetchedMessage(
                 dialog_id=dialog_id,
                 dialog_title=dialog_id,
                 is_open_line=True,
                 message_id=msg_id,
+                author_id=str(msg.get("senderid")) if msg.get("senderid") is not None else None,
                 author_name=f"Клиент открытой линии #{msg.get('senderid', '?')}",
                 text=msg.get("text", ""),
                 date=msg.get("date", ""),

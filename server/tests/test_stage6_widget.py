@@ -82,14 +82,18 @@ class TestWidgetIndex:
         html = client.get("/").text
         assert 'API_BASE = "/api/portals"' in html
 
-    def test_widget_has_both_auth_type_options(self, client):
+    def test_widget_offers_only_webhook(self, client):
+        """vibe_api как способ авторизации внешнего портала убран — виджет
+        предлагает только URL вебхука, без переключателя способа (см.
+        external_portal_client.py про причину)."""
         html = client.get("/").text
-        assert 'data-auth-type="vibe_api"' in html
-        assert 'data-auth-type="webhook"' in html
+        assert "data-auth-type" not in html
+        assert "URL вебхука" in html
 
-    def test_widget_handles_all_three_status_values(self, client):
-        """PortalStatus = Literal["active", "error", "disabled"] — все три должны быть отрисовываемы."""
+    def test_widget_handles_all_status_values(self, client):
+        """PortalStatus = Literal["connecting", "active", "error", "disabled"] — все должны быть отрисовываемы."""
         html = client.get("/").text
+        assert '"connecting"' in html or "connecting:" in html
         assert '"active"' in html or "active:" in html
         assert '"error"' in html or "error:" in html
         assert '"disabled"' in html or "disabled:" in html

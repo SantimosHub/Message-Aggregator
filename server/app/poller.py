@@ -31,13 +31,9 @@ from datetime import datetime
 
 from .config import get_settings
 from .external_message_fetcher import ExternalPortalApiError, FetchedMessage, fetch_new_messages
-from .external_portal_client import (
-    ExternalPortalCredentialsError,
-    validate_vibe_api_key,
-    validate_webhook,
-)
+from .external_portal_client import ExternalPortalCredentialsError, validate_webhook
 from .repositories import external_portals as repo
-from .vibe_client import VibeApiError, create_group_chat, send_chat_message
+from .vibe_client import VibeApiError, create_group_chat, mark_message_read, send_chat_message
 
 logger = logging.getLogger("message_aggregator.poller")
 
@@ -82,10 +78,14 @@ async def finish_connecting_portal(portal: repo.ExternalPortal) -> None:
        только статус 'connecting'.
     """
     try:
-        if portal.auth_type == "vibe_api":
-            await validate_vibe_api_key(portal.credentials)
-        else:
-            await validate_webhook(portal.credentials)
+        # Только webhook (vibe_api как способ авторизации внешнего портала
+        # убран — не было протестировано вживую и не позволяло определить
+        # ID сотрудника на внешнем портале для пометки "своих" сообщений
+        # прочитанными, см. finish_connecting_portal ниже и db.py).
+        profile = await validate_webhook(portal.credentials)
+        owner_id = (profile or {}).get("result", {}).get("ID") if isinstance(profile, dict) else None
+        if owner_id:
+            await repo.set_owner_external_user_id(portal.id, str(owner_id))
     except ExternalPortalCredentialsError as exc:
         logger.warning(
             "Портал #%s (%s): невалидные credentials, статус -> error: %s",
@@ -199,7 +199,12 @@ def _format_digest(portal: repo.ExternalPortal, dialog_messages: list[FetchedMes
         lines.append("")
 
     link = f"https://{portal.domain}/online/?IM_DIALOG={dialog_messages[0].dialog_id}"
-    lines.append(f"Открыть диалог: {link}")
+    # [URL=...] вместо голой ссылки — Битрикс24 автоматически разворачивает
+    # "голые" URL на своих доменах в большую карточку-превью с логотипом и
+    # кнопкой "Войти в Битрикс24" на каждое сообщение, что визуально
+    # перегружает дайджест. BB-код с явным текстом ссылки такого разворачивания
+    # не вызывает (см. https://vibecode.bitrix24.tech/docs/bots/messages/formatting).
+    lines.append(f"[url={link}]Открыть диалог[/url]")
     return "\n".join(lines).strip()
 
 
@@ -222,7 +227,7 @@ async def _handle_new_messages(
     for dialog_id, dialog_messages in by_dialog.items():
         text = _format_digest(portal, dialog_messages)
         try:
-            await send_chat_message(portal.main_chat_id, text)
+            sent_message_id = await send_chat_message(portal.main_chat_id, text)
         except VibeApiError:
             logger.exception(
                 "Портал #%s (%s): не удалось отправить дайджест диалога %s в чат %s — "
@@ -230,6 +235,25 @@ async def _handle_new_messages(
                 portal.id, portal.domain, dialog_id, portal.main_chat_id,
             )
             continue
+
+        # Если дайджест ЦЕЛИКОМ состоит из сообщений самого сотрудника на
+        # внешнем портале (он же отвечал собеседнику оттуда) — сразу
+        # помечаем прочитанным, чтобы не создавать шум "непрочитанное" на
+        # его же собственных словах. owner_external_user_id заполняется при
+        # успешном подключении (finish_connecting_portal) — если по какой-то
+        # причине его ещё нет (старые записи до этого поля), условие просто
+        # не сработает, и дайджест останется в обычном непрочитанном виде.
+        if portal.owner_external_user_id and all(
+            m.author_id == portal.owner_external_user_id for m in dialog_messages
+        ):
+            try:
+                await mark_message_read(portal.main_chat_id, sent_message_id)
+            except VibeApiError:
+                logger.warning(
+                    "Портал #%s (%s): не удалось пометить дайджест диалога %s прочитанным "
+                    "(не критично, сообщение уже доставлено)",
+                    portal.id, portal.domain, dialog_id,
+                )
 
         delivered[dialog_id] = max(m.message_id for m in dialog_messages)
         logger.info(
