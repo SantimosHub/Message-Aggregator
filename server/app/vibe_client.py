@@ -151,37 +151,6 @@ async def send_chat_message(chat_id: int, text: str) -> int:
     return data["data"]["id"]
 
 
-async def mark_message_read(chat_id: int, message_id: int) -> None:
-    """
-    POST /v1/bots/:botId/chats/:dialogId/read (imbot.v2.Chat.Message.read) —
-    помечает сообщения в чате прочитанными вплоть до указанного message_id
-    включительно.
-
-    Используется, когда пересланный дайджест целиком состоит из сообщений,
-    которые сотрудник сам написал на внешнем портале (см.
-    poller._handle_new_messages) — незачем показывать непрочитанным то, что
-    человек и так уже знает, ведь он сам это написал.
-
-    ПРИМЕЧАНИЕ: точный контракт тела запроса для этого конкретного
-    эндпоинта Бот-платформы не задокументирован публично так же подробно,
-    как остальные вызовы в этом файле (в отличие от них, официальный пример
-    запроса/ответа для .../read не найден) — реализация следует
-    общепринятому для Битрикс24 полю messageId по аналогии с im.dialog.read.
-    Ошибка здесь не критична — сообщение уже успешно отправлено, поэтому
-    вызывающий код обязан перехватывать VibeApiError и только логировать,
-    не откатывать уже состоявшуюся отправку.
-    """
-    settings = get_settings()
-    bot_id = await _ensure_bot_id()
-    dialog_id = f"chat{chat_id}"
-    await _request(
-        "POST",
-        f"/v1/bots/{bot_id}/chats/{dialog_id}/read",
-        headers={"X-Api-Key": settings.vibe_background_api_key},
-        json={"messageId": message_id},
-    )
-
-
 async def get_me(session_bearer: str | None = None) -> dict:
     """
     GET /v1/me — с ключом vibe_app_... приложения.

@@ -33,7 +33,7 @@ from .config import get_settings
 from .external_message_fetcher import ExternalPortalApiError, FetchedMessage, fetch_new_messages
 from .external_portal_client import ExternalPortalCredentialsError, validate_webhook
 from .repositories import external_portals as repo
-from .vibe_client import VibeApiError, create_group_chat, mark_message_read, send_chat_message
+from .vibe_client import VibeApiError, create_group_chat, send_chat_message
 
 logger = logging.getLogger("message_aggregator.poller")
 
@@ -80,8 +80,9 @@ async def finish_connecting_portal(portal: repo.ExternalPortal) -> None:
     try:
         # Только webhook (vibe_api как способ авторизации внешнего портала
         # убран — не было протестировано вживую и не позволяло определить
-        # ID сотрудника на внешнем портале для пометки "своих" сообщений
-        # прочитанными, см. finish_connecting_portal ниже и db.py).
+        # ID сотрудника на внешнем портале). ID сохраняется для фильтрации
+        # его собственных сообщений в открытых линиях при опросе — см.
+        # external_message_fetcher.py, _fetch_open_line_messages.
         profile = await validate_webhook(portal.credentials)
         owner_id = (profile or {}).get("result", {}).get("ID") if isinstance(profile, dict) else None
         if owner_id:
@@ -227,7 +228,7 @@ async def _handle_new_messages(
     for dialog_id, dialog_messages in by_dialog.items():
         text = _format_digest(portal, dialog_messages)
         try:
-            sent_message_id = await send_chat_message(portal.main_chat_id, text)
+            await send_chat_message(portal.main_chat_id, text)
         except VibeApiError:
             logger.exception(
                 "Портал #%s (%s): не удалось отправить дайджест диалога %s в чат %s — "
@@ -236,24 +237,11 @@ async def _handle_new_messages(
             )
             continue
 
-        # Если дайджест ЦЕЛИКОМ состоит из сообщений самого сотрудника на
-        # внешнем портале (он же отвечал собеседнику оттуда) — сразу
-        # помечаем прочитанным, чтобы не создавать шум "непрочитанное" на
-        # его же собственных словах. owner_external_user_id заполняется при
-        # успешном подключении (finish_connecting_portal) — если по какой-то
-        # причине его ещё нет (старые записи до этого поля), условие просто
-        # не сработает, и дайджест останется в обычном непрочитанном виде.
-        if portal.owner_external_user_id and all(
-            m.author_id == portal.owner_external_user_id for m in dialog_messages
-        ):
-            try:
-                await mark_message_read(portal.main_chat_id, sent_message_id)
-            except VibeApiError:
-                logger.warning(
-                    "Портал #%s (%s): не удалось пометить дайджест диалога %s прочитанным "
-                    "(не критично, сообщение уже доставлено)",
-                    portal.id, portal.domain, dialog_id,
-                )
+        # Собственные сообщения сотрудника на внешнем портале сюда не
+        # попадают вовсе — отфильтрованы ещё на этапе получения
+        # (external_message_fetcher.py: unread=false для обычных диалогов,
+        # сравнение с owner_external_user_id для открытых линий), поэтому
+        # отдельная пометка "прочитано" здесь больше не нужна.
 
         delivered[dialog_id] = max(m.message_id for m in dialog_messages)
         logger.info(

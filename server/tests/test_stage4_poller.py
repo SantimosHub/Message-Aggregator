@@ -49,9 +49,9 @@ RECENT_LIST_ONE_CHAT = {
 
 DIALOG_MESSAGES_RESPONSE = {
     "messages": [
-        {"id": 98, "author_id": 547, "text": "старое", "date": "2026-01-01T00:00:00+01:00"},
-        {"id": 99, "author_id": 547, "text": "новое 1", "date": "2026-01-01T00:00:01+01:00"},
-        {"id": 100, "author_id": 547, "text": "новое 2", "date": "2026-01-01T00:00:02+01:00"},
+        {"id": 98, "author_id": 547, "text": "старое", "date": "2026-01-01T00:00:00+01:00", "unread": False},
+        {"id": 99, "author_id": 547, "text": "новое 1", "date": "2026-01-01T00:00:01+01:00", "unread": True},
+        {"id": 100, "author_id": 547, "text": "новое 2", "date": "2026-01-01T00:00:02+01:00", "unread": True},
     ],
     "users": {"547": {"first_name": "Иван", "last_name": "Петров"}},
 }
@@ -91,6 +91,53 @@ class TestFetchNewMessagesRegularDialog:
         assert messages[0].text == "новое 1"
         assert messages[0].author_name == "Иван Петров"
         assert new_cursor == {"chat1317": "100"}
+
+    @pytest.mark.asyncio
+    async def test_read_messages_are_not_forwarded(self):
+        """
+        unread=false — сотрудник либо сам написал это сообщение (свои
+        исходящие не бывают непрочитанными для себя же), либо уже прочитал
+        его на внешнем портале напрямую. Ни то, ни другое пересылать не
+        нужно (см. docstring external_message_fetcher.py).
+        """
+        recent = {
+            "items": [
+                {
+                    "id": "chat1317",
+                    "chat_id": 1317,
+                    "type": "chat",
+                    "title": "Support chat",
+                    "message": {"id": 102, "text": "last"},
+                    "lines": None,
+                }
+            ]
+        }
+        messages_response = {
+            "messages": [
+                {"id": 101, "author_id": 900, "text": "мой собственный ответ", "date": "x", "unread": False},
+                {"id": 102, "author_id": 547, "text": "новое от клиента", "date": "x", "unread": True},
+            ],
+            "users": {},
+        }
+
+        async def fake_call(portal_arg, method, params):
+            if method == "im.recent.list":
+                return recent
+            if method == "im.dialog.messages.get":
+                return messages_response
+            raise AssertionError(f"unexpected method {method}")
+
+        portal = _portal(last_message_cursor={"chat1317": "100"})
+        with patch("app.external_message_fetcher._call_method", side_effect=fake_call):
+            messages, new_cursor = await fetch_new_messages(portal)
+
+        assert [m.message_id for m in messages] == [102]
+        assert messages[0].text == "новое от клиента"
+        # Курсор продвигается до последнего id из im.recent.list (102), а не
+        # до максимума среди прошедших фильтр (тоже 102 в этом случае, но
+        # важно что не застревает на отфильтрованном 101 — иначе оно бы
+        # запрашивалось заново на каждом цикле).
+        assert new_cursor == {"chat1317": "102"}
 
     @pytest.mark.asyncio
     async def test_no_new_activity_skips_dialog_messages_call(self):
@@ -187,6 +234,78 @@ class TestFetchNewMessagesOpenLine:
         assert [m.message_id for m in messages] == [51]
         assert messages[0].text == "реальное сообщение клиента"
         assert new_cursor == {"chat2002": "51"}
+
+    @pytest.mark.asyncio
+    async def test_open_line_skips_owners_own_messages(self):
+        """
+        У истории открытой линии нет поля unread (в отличие от обычных
+        диалогов) — свои сообщения сотрудника (он же отвечал как оператор)
+        фильтруются по совпадению senderid с owner_external_user_id портала
+        (сохраняется при подключении, см. poller.finish_connecting_portal).
+        """
+        recent = {
+            "items": [
+                {
+                    "id": "chat2003",
+                    "chat_id": 2003,
+                    "type": "chat",
+                    "title": "Open line #2003",
+                    "message": {"id": 61, "text": "last"},
+                    "lines": {"id": 1, "status": 1},
+                }
+            ]
+        }
+        history = {
+            "message": {
+                "59": {"id": "59", "senderid": "86", "text": "ответ оператора", "date": "x"},
+                "61": {"id": "61", "senderid": "1756", "text": "вопрос клиента", "date": "x"},
+            }
+        }
+
+        async def fake_call(portal_arg, method, params):
+            if method == "im.recent.list":
+                return recent
+            if method == "imopenlines.session.history.get":
+                return history
+            raise AssertionError(f"unexpected method {method}")
+
+        portal = _portal(last_message_cursor={"chat2003": "50"}, owner_external_user_id="86")
+        with patch("app.external_message_fetcher._call_method", side_effect=fake_call):
+            messages, new_cursor = await fetch_new_messages(portal)
+
+        assert [m.message_id for m in messages] == [61]
+        assert messages[0].text == "вопрос клиента"
+        assert new_cursor == {"chat2003": "61"}
+
+    @pytest.mark.asyncio
+    async def test_open_line_forwards_everything_when_owner_id_unknown(self):
+        """Портал без owner_external_user_id (например, подключён до появления этого поля) — фильтр по автору просто не срабатывает."""
+        recent = {
+            "items": [
+                {
+                    "id": "chat2004",
+                    "chat_id": 2004,
+                    "type": "chat",
+                    "title": "Open line #2004",
+                    "message": {"id": 71, "text": "last"},
+                    "lines": {"id": 1, "status": 1},
+                }
+            ]
+        }
+        history = {"message": {"71": {"id": "71", "senderid": "86", "text": "что-то", "date": "x"}}}
+
+        async def fake_call(portal_arg, method, params):
+            if method == "im.recent.list":
+                return recent
+            if method == "imopenlines.session.history.get":
+                return history
+            raise AssertionError(f"unexpected method {method}")
+
+        portal = _portal(last_message_cursor={"chat2004": "60"}, owner_external_user_id=None)
+        with patch("app.external_message_fetcher._call_method", side_effect=fake_call):
+            messages, new_cursor = await fetch_new_messages(portal)
+
+        assert [m.message_id for m in messages] == [71]
 
 
 class TestAuthErrorPropagation:

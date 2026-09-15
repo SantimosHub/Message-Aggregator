@@ -144,10 +144,12 @@ async def _migrate_owner_external_user_id_column(conn: aiosqlite.Connection) -> 
     числовой ID сотрудника НА ВНЕШНЕМ портале (для webhook — из ответа
     profile.json при подключении, см. poller.finish_connecting_portal).
 
-    Нужно, чтобы отличать в дайджесте собственные сообщения сотрудника на
-    внешнем портале от сообщений собеседника — целиком "свои" дайджесты
-    сразу помечаются прочитанными (poller._handle_new_messages), чтобы не
-    создавать шум "непрочитанное" на словах, которые человек сам написал.
+    Нужно, чтобы отличать собственные сообщения сотрудника на внешнем
+    портале (он же отвечал собеседнику как оператор) от сообщений
+    собеседника — для открытых линий (imopenlines.session.history.get не
+    возвращает флаг "прочитано", в отличие от обычных диалогов) такие
+    сообщения фильтруются по этому ID и вообще не пересылаются (см.
+    external_message_fetcher.py, _fetch_open_line_messages).
     """
     async with conn.execute("PRAGMA table_info(external_portals)") as cur:
         columns = {row[1] async for row in cur}

@@ -162,9 +162,11 @@ async def mark_portal_error(portal_id: int, error_message: str) -> None:
 async def set_owner_external_user_id(portal_id: int, owner_external_user_id: str) -> None:
     """Сохраняет числовой ID сотрудника на ВНЕШНЕМ портале (из ответа
     profile.json при подключении по вебхуку — см.
-    poller.finish_connecting_portal). Используется для пометки дайджестов,
-    целиком состоящих из собственных сообщений сотрудника, прочитанными
-    (poller._handle_new_messages) — см. docstring колонки в db.py."""
+    poller.finish_connecting_portal). Используется, чтобы не пересылать
+    собственные сообщения сотрудника из открытых линий (см.
+    external_message_fetcher.py, _fetch_open_line_messages) — для обычных
+    диалогов вместо этого используется флаг unread из im.dialog.messages.get.
+    См. docstring колонки в db.py."""
     async with get_connection() as conn:
         await conn.execute(
             "UPDATE external_portals SET owner_external_user_id = ? WHERE id = ?",
